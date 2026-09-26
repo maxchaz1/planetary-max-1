@@ -1,70 +1,26 @@
 // src/index.ts
-// Portal‑OS v11 — Worker Entry
+// Portal‑OS v11 — Worker Router
 
 import { Hono } from "hono";
-import { cors } from "hono/cors";
-import type { Bindings } from "./contracts";
+import { kernelStub } from "./kernel/stub";
 
-const app = new Hono<{ Bindings: Bindings }>();
-const api = new Hono<{ Bindings: Bindings }>();
+const api = new Hono();
 
 // ------------------------------------------------------------
-// CORS
+// Timeline Route
 // ------------------------------------------------------------
-app.use(
-  "*",
-  cors({
-    origin: "*",
-    allowMethods: ["GET", "POST", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
-  })
-);
+api.post("/portal/timeline", async (c) => {
+  const body = await c.req.json();
 
-// ------------------------------------------------------------
-// Root + Health
-// ------------------------------------------------------------
-app.get("/", (c) =>
-  c.json({
-    ok: true,
-    service: "portal-os",
-    phase: c.env.PORTAL_OS_PHASE ?? "11",
-  })
-);
-
-app.get("/health", (c) => c.json({ ok: true }));
-
-// ------------------------------------------------------------
-// Timeline
-// ------------------------------------------------------------
-api.get("/portal/timeline", async (c) => {
   const stub = kernelStub(c.env);
   const res = await stub.fetch(
-    new Request("https://portal/kernel", {
+    new Request("https://portal/api/portal/timeline", {
       method: "POST",
       body: JSON.stringify({
         id: crypto.randomUUID(),
         lane: "portal:timeline",
-        payload: {},
-      }),
-    })
-  );
-  return c.json(await res.json());
-});
-
-// ------------------------------------------------------------
-// Diff
-// ------------------------------------------------------------
-api.post("/portal/diff", async (c) => {
-  const body = await c.req.json();
-  const stub = kernelStub(c.env);
-
-  const res = await stub.fetch(
-    new Request("https://portal/kernel", {
-      method: "POST",
-      body: JSON.stringify({
-        id: crypto.randomUUID(),
-        lane: "portal:diff",
         payload: body,
+        identity: "introspection",
       }),
     })
   );
@@ -73,19 +29,20 @@ api.post("/portal/diff", async (c) => {
 });
 
 // ------------------------------------------------------------
-// Quantum Substrate
+// Replay Route
 // ------------------------------------------------------------
-api.post("/portal/quantum", async (c) => {
+api.post("/portal/replay", async (c) => {
   const body = await c.req.json();
-  const stub = kernelStub(c.env);
 
+  const stub = kernelStub(c.env);
   const res = await stub.fetch(
-    new Request("https://portal/kernel", {
+    new Request("https://portal/api/portal/replay", {
       method: "POST",
       body: JSON.stringify({
         id: crypto.randomUUID(),
-        lane: "portal:quantum",
+        lane: "portal:replay",
         payload: body,
+        identity: "introspection",
       }),
     })
   );
@@ -94,42 +51,20 @@ api.post("/portal/quantum", async (c) => {
 });
 
 // ------------------------------------------------------------
-// Advisory Engine
+// Canon Route
 // ------------------------------------------------------------
-api.get("/portal/advisory", async (c) => {
-  const stub = kernelStub(c.env);
-
-  const res = await stub.fetch(
-    new Request("https://portal/kernel", {
-      method: "POST",
-      body: JSON.stringify({
-        id: crypto.randomUUID(),
-        lane: "portal:advisory",
-        payload: {},
-      }),
-    })
-  );
-
-  return c.json(await res.json());
-});
-
-// ------------------------------------------------------------
-// Identity Surface
-// ------------------------------------------------------------
-api.post("/portal/identity-surface", async (c) => {
+api.post("/portal/canon", async (c) => {
   const body = await c.req.json();
-  const identity = body.identity ?? "anonymous";
 
   const stub = kernelStub(c.env);
-
   const res = await stub.fetch(
-    new Request("https://portal/kernel", {
+    new Request("https://portal/api/portal/canon", {
       method: "POST",
       body: JSON.stringify({
         id: crypto.randomUUID(),
-        lane: "identity:surface",
-        identity,
+        lane: "portal:canon",
         payload: body,
+        identity: "introspection",
       }),
     })
   );
@@ -137,81 +72,4 @@ api.post("/portal/identity-surface", async (c) => {
   return c.json(await res.json());
 });
 
-// ------------------------------------------------------------
-// Scheduler (tick engine)
-// ------------------------------------------------------------
-api.get("/portal/scheduler", async (c) => {
-  const stub = kernelStub(c.env);
-
-  const res = await stub.fetch(
-    new Request("https://portal/kernel", {
-      method: "POST",
-      body: JSON.stringify({
-        id: crypto.randomUUID(),
-        lane: "portal:scheduler",
-        payload: {},
-      }),
-    })
-  );
-
-  return c.json(await res.json());
-});
-
-// ------------------------------------------------------------
-// Umbrella Governance Field
-// ------------------------------------------------------------
-api.post("/portal/umbrella", async (c) => {
-  const body = await c.req.json();
-  const identity = body.identity ?? null;
-
-  const stub = kernelStub(c.env);
-
-  const res = await stub.fetch(
-    new Request("https://portal/kernel", {
-      method: "POST",
-      body: JSON.stringify({
-        id: crypto.randomUUID(),
-        lane: "portal:umbrella",
-        identity,
-        payload: body,
-      }),
-    })
-  );
-
-  return c.json(await res.json());
-});
-
-// ------------------------------------------------------------
-// Mount API
-// ------------------------------------------------------------
-app.route("/api", api);
-
-// ------------------------------------------------------------
-// Kernel Stub
-// ------------------------------------------------------------
-function kernelStub(env: Bindings) {
-  const id = env.PORTAL_KERNEL.idFromName("kernel");
-  return env.PORTAL_KERNEL.get(id);
-}
-
-// ------------------------------------------------------------
-// Worker Export
-// ------------------------------------------------------------
-export default {
-  async fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/kernel") {
-      const stub = kernelStub(env);
-      return stub.fetch(request);
-    }
-
-    return app.fetch(request, env, ctx);
-  },
-};
-
-// ------------------------------------------------------------
-// Durable Object Exports (REQUIRED FOR DEPLOY)
-// ------------------------------------------------------------
-export { PortalKernel } from "./kernel/PortalKernel";
-export { new_sqlite_classes } from "./do/new_sqlite_classes";
+export default api;
