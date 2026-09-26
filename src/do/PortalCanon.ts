@@ -1,89 +1,57 @@
 // src/do/PortalCanon.ts
-// Portal‑OS v11 — Canon Engine (Truth Structure + Signature + Compiler)
+// Portal‑OS v11 — Canon Integration Substrate
 
-import type { DurableObjectState } from "@cloudflare/workers-types";
-import type { JsonObject } from "../contracts";
+import type { PortalTimelineEvent } from "./PortalTimeline";
 
-export interface CanonTruth {
+export type PortalCanonEntry = {
   id: string;
-  panel: string | null;
-  action: string;
   timestamp: number;
-  payload: JsonObject;
+  action: string;
+  panel?: string;
+  payload: Record<string, unknown>;
+  meaning: string; // canonical meaning
+};
+
+export type PortalCanon = {
+  entries: PortalCanonEntry[];
+};
+
+export function createEmptyCanon(): PortalCanon {
+  return { entries: [] };
 }
 
-export interface CanonState {
-  signature: string;
-  truths: CanonTruth[];
-}
-
-export function createEmptyCanon(): CanonState {
+export function canonizeEvent(event: PortalTimelineEvent): PortalCanonEntry {
   return {
-    signature: "EMPTY-CANON",
-    truths: [],
+    id: event.id,
+    timestamp: event.timestamp,
+    action: event.action,
+    panel: event.panel,
+    payload: event.payload,
+    meaning: deriveMeaning(event),
   };
 }
 
-// ------------------------------------------------------------
-// Load + Save
-// ------------------------------------------------------------
-export async function loadCanon(state: DurableObjectState): Promise<CanonState> {
-  return (
-    (await state.storage.get("portal:canon")) ??
-    createEmptyCanon()
-  );
+function deriveMeaning(event: PortalTimelineEvent): string {
+  switch (event.action) {
+    case "open":
+      return `Panel ${event.panel} was opened`;
+    case "close":
+      return `Panel ${event.panel} was closed`;
+    case "move":
+      return `Panel ${event.panel} moved to (${event.payload.x}, ${event.payload.y})`;
+    case "resize":
+      return `Panel ${event.panel} resized to ${event.payload.width}x${event.payload.height}`;
+    case "toggle":
+      return `Panel ${event.panel} visibility set to ${event.payload.visible}`;
+    default:
+      return `Unknown action ${event.action}`;
+  }
 }
 
-export async function saveCanon(
-  state: DurableObjectState,
-  canon: CanonState
-) {
-  await state.storage.put("portal:canon", canon);
-}
-
-// ------------------------------------------------------------
-// Add truth
-// ------------------------------------------------------------
-export function addTruth(
-  canon: CanonState,
-  truth: CanonTruth
-): CanonState {
-  return {
-    ...canon,
-    truths: [...canon.truths, truth],
-  };
-}
-
-// ------------------------------------------------------------
-// Canon signature compiler
-// ------------------------------------------------------------
-export function compileCanonSignature(canon: CanonState): string {
-  const hashInput = canon.truths
-    .map((t) => `${t.id}:${t.action}:${t.panel}:${t.timestamp}`)
-    .join("|");
-
-  // Simple deterministic signature
-  const signature = crypto
-    .subtle
-    .digest("SHA-256", new TextEncoder().encode(hashInput))
-    .then((buf) =>
-      Array.from(new Uint8Array(buf))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")
-    );
-
-  return `CANON-${canon.truths.length}-${Date.now()}`;
-}
-
-// ------------------------------------------------------------
-// Canon envelope
-// ------------------------------------------------------------
-export function toCanonEnvelope(canon: CanonState) {
-  return {
-    ok: true,
-    canon: {
-      signature: canon.signature,
-      truths: canon.truths,
-    },
-  };
+export function appendCanon(
+  canon: PortalCanon,
+  entry: PortalCanonEntry
+): PortalCanon {
+  canon.entries.push(entry);
+  return canon;
 }
