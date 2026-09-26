@@ -2,24 +2,34 @@
 // Portal‑OS v11 — Kernel (Envelope Dispatch + Modal Lanes)
 
 import { DurableObjectState } from "@cloudflare/workers-types";
-import { JsonObject } from "../contracts";
+import type { JsonObject } from "../contracts";
 
+// Timeline
 import {
   loadTimeline,
   saveTimeline,
   appendTimelineEvent,
 } from "../do/PortalTimeline";
 
-import {
-  replaySurface,
-} from "../do/PortalReplay";
+// Replay
+import { replaySurface } from "../do/PortalReplay";
 
+// Canon
 import {
   loadCanon,
   saveCanon,
   canonizeEvent,
   appendCanon,
 } from "../do/PortalCanon";
+
+// Quantum
+import {
+  loadQuantum,
+  saveQuantum,
+  computeEntropy,
+  addQuantumField,
+  toQuantumEnvelope,
+} from "../do/PortalQuantum";
 
 export class PortalKernel {
   state: DurableObjectState;
@@ -42,6 +52,9 @@ export class PortalKernel {
 
       case "portal:canon":
         return this.handlePortalCanon(payload);
+
+      case "portal:quantum":
+        return this.handlePortalQuantum(payload);
 
       default:
         return Response.json({
@@ -118,5 +131,26 @@ export class PortalKernel {
       lane: "portal:canon",
       entry,
     });
+  }
+
+  // ------------------------------------------------------------
+  // Quantum Lane
+  // ------------------------------------------------------------
+  async handlePortalQuantum(payload: JsonObject): Promise<Response> {
+    let quantum = await loadQuantum(this.state);
+
+    const field = {
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      entropy: computeEntropy(payload),
+      lane: payload.lane ?? "portal",
+      panel: payload.panel ?? null,
+      payload,
+    };
+
+    quantum = addQuantumField(quantum, field);
+    await saveQuantum(this.state, quantum);
+
+    return Response.json(toQuantumEnvelope(quantum));
   }
 }
