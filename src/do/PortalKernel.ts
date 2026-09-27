@@ -700,3 +700,74 @@ export class PortalKernel {
     if (!eventFrom || !eventTo) {
       return Response.json(
         {
+    return Response.json(toPortalDiffEnvelope(diff));
+  }
+
+  // ------------------------------------------------------------
+  // ⭐ Replay engine lane
+  // ------------------------------------------------------------
+  async handlePortalReplay(payload: JsonObject): Promise<Response> {
+    const eventId = payload.eventId ?? null;
+
+    const timeline = await this.loadTimeline();
+    const surface = await this.replaySurfaceUntil(eventId);
+
+    return Response.json({
+      ok: true,
+      lane: "portal:replay",
+      eventId,
+      surface: toPortalEnvelope(surface),
+    });
+  }
+
+  // ------------------------------------------------------------
+  // Replay engine core
+  // ------------------------------------------------------------
+  async replaySurfaceUntil(eventId: string): Promise<PortalSurfaceState> {
+    const timeline = await this.loadTimeline();
+    let surface = createEmptyPortalSurfaceState();
+
+    for (const event of timeline.events) {
+      const { action, panel, payload } = event;
+
+      switch (action) {
+        case "open":
+          surface = openPanel(surface, {
+            id: panel!,
+            title: payload.title ?? panel,
+            x: payload.x ?? 100,
+            y: payload.y ?? 100,
+            width: payload.width ?? 300,
+            height: payload.height ?? 200,
+            visible: true,
+          });
+          break;
+
+        case "close":
+          surface = closePanel(surface, panel!);
+          break;
+
+        case "move":
+          surface = movePanel(surface, panel!, payload.x, payload.y);
+          break;
+
+        case "resize":
+          surface = resizePanel(
+            surface,
+            panel!,
+            payload.width,
+            payload.height
+          );
+          break;
+
+        case "toggle":
+          surface = togglePanel(surface, panel!, payload.visible);
+          break;
+      }
+
+      if (event.id === eventId) break;
+    }
+
+    return surface;
+  }
+} // ← closes PortalKernel class
