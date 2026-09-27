@@ -25,24 +25,27 @@ export type PlanetaryNodeSnapshot = {
  *
  * Full planetary substrate state.
  */
-export type PlanetaryState = {
+export interface PlanetaryState {
   globalTick: number;
-  nodes: PlanetaryNodeSnapshot[];
-  identities: Record<string, JsonObject>;
-  substrate: Record<string, JsonObject>;
-  quantum: Record<string, JsonObject>;
-  canon: JsonObject;
-  governance: JsonObject;
-  advisories: JsonObject[];
+  nodes: any[];
+  identities: Record<string, any>;
+  substrate: Record<string, any>;
+  quantum: Record<string, any>;
+  canon: Record<string, any>;
+  governance: Record<string, any>;
+  advisories: any[];
   synchronizedAt: number;
   packetSignature: string;
-};
 
-/**
- * createEmptyPlanetaryState
- *
- * Base planetary state when OS boots.
- */
+  // Phase 12 — Quantum Entropy Fields
+  quantumEntropy: number;
+  entropyGradient: number[];
+  coherenceField: number[];
+  entanglementGraph: Record<string, string[]>;
+  signatureMap: Record<string, string>;
+  entropyTick: number;
+}
+
 export function createEmptyPlanetaryState(): PlanetaryState {
   return {
     globalTick: 0,
