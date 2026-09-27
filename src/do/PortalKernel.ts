@@ -907,4 +907,116 @@ export class PortalKernel {
 
     return surface;
   }
-} // ← close PortalKernel class
+    // ------------------------------------------------------------
+  // ⭐ Phase‑12 Planetary Node Lifecycle
+  // ------------------------------------------------------------
+
+  private createNode(id: string, identity: IdentityContext | null) {
+    const node = {
+      id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      divergence: 0,
+      coherenceLoss: 0,
+      signatureDrift: 0,
+      entangledWith: [],
+      identity: identity ? identity.subject : "anonymous",
+      state: {},
+    };
+
+    this.planetary.nodes.push(node);
+    return node;
+  }
+
+  private getNode(id: string) {
+    return this.planetary.nodes.find((n) => n.id === id) ?? null;
+  }
+
+  private updateNode(id: string, mutation: JsonObject) {
+    const node = this.getNode(id);
+    if (!node) return null;
+
+    node.updatedAt = Date.now();
+
+    // Mutation increases divergence
+    node.divergence += 0.01;
+
+    // Signature drift increases with mutation complexity
+    node.signatureDrift += Object.keys(mutation).length * 0.001;
+
+    // Coherence loss increases with entropy
+    node.coherenceLoss += this.planetary.quantumEntropy * 0.005;
+
+    // Apply mutation
+    Object.assign(node.state, mutation);
+
+    return node;
+  }
+
+  private removeNode(id: string) {
+    this.planetary.nodes = this.planetary.nodes.filter((n) => n.id !== id);
+  }
+
+  private resetNode(id: string) {
+    const node = this.getNode(id);
+    if (!node) return null;
+
+    node.state = {};
+    node.divergence = 0;
+    node.coherenceLoss = 0;
+    node.signatureDrift = 0;
+    node.entangledWith = [];
+    node.updatedAt = Date.now();
+
+    return node;
+  }
+
+  private forkNode(id: string, newId: string) {
+    const node = this.getNode(id);
+    if (!node) return null;
+
+    const fork = {
+      ...node,
+      id: newId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      divergence: node.divergence * 0.5,
+      coherenceLoss: node.coherenceLoss * 0.5,
+      signatureDrift: node.signatureDrift * 0.5,
+    };
+
+    this.planetary.nodes.push(fork);
+    return fork;
+  }
+
+  private injectNode(id: string, payload: JsonObject) {
+    const node = this.getNode(id);
+    if (!node) return null;
+
+    node.state = {
+      ...node.state,
+      ...payload,
+    };
+
+    node.updatedAt = Date.now();
+    node.divergence += 0.02;
+
+    return node;
+  }
+
+  private entangleNodes(a: string, b: string) {
+    const nodeA = this.getNode(a);
+    const nodeB = this.getNode(b);
+
+    if (!nodeA || !nodeB) return;
+
+    nodeA.entangledWith.push(b);
+    nodeB.entangledWith.push(a);
+
+    this.planetary.entanglementGraph[`${a}:${b}`] = {
+      createdAt: Date.now(),
+      entropy: this.planetary.quantumEntropy,
+    };
+  }
+
+} 
