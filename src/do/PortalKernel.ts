@@ -83,6 +83,113 @@ export class PortalKernel {
   }
 
   // ------------------------------------------------------------
+  // ⭐ Strict Envelope Validation (Phase‑12)
+  // ------------------------------------------------------------
+  private validateEnvelopeStrict(envelope: KernelEnvelope): {
+    ok: boolean;
+    error?: { code: string; message: string };
+  } {
+    const required = ["id", "lane", "op", "payload"];
+    for (const field of required) {
+      if (!(field in envelope)) {
+        return {
+          ok: false,
+          error: {
+            code: "STRICT_ENVELOPE_MISSING_FIELD",
+            message: `Envelope missing required field: ${field}`,
+          },
+        };
+      }
+    }
+
+    if (typeof envelope.id !== "string") {
+      return {
+        ok: false,
+        error: {
+          code: "STRICT_ENVELOPE_INVALID_ID",
+          message: "Envelope.id must be a string",
+        },
+      };
+    }
+
+    if (typeof envelope.lane !== "string") {
+      return {
+        ok: false,
+        error: {
+          code: "STRICT_ENVELOPE_INVALID_LANE",
+          message: "Envelope.lane must be a string",
+        },
+      };
+    }
+
+    if (typeof envelope.op !== "string") {
+      return {
+        ok: false,
+        error: {
+          code: "STRICT_ENVELOPE_INVALID_OP",
+          message: "Envelope.op must be a string",
+        },
+      };
+    }
+
+    if (typeof envelope.payload !== "object" || envelope.payload === null) {
+      return {
+        ok: false,
+        error: {
+          code: "STRICT_ENVELOPE_INVALID_PAYLOAD",
+          message: "Envelope.payload must be a JSON object",
+        },
+      };
+    }
+
+    if (envelope.meta && typeof envelope.meta !== "object") {
+      return {
+        ok: false,
+        error: {
+          code: "STRICT_ENVELOPE_INVALID_META",
+          message: "Envelope.meta must be a JSON object",
+        },
+      };
+    }
+
+    if (envelope.identity && typeof envelope.identity !== "string") {
+      return {
+        ok: false,
+        error: {
+          code: "STRICT_ENVELOPE_INVALID_IDENTITY",
+          message: "Envelope.identity must be a string when present",
+        },
+      };
+    }
+
+    const allowedLanes = new Set([
+      "identity",
+      "windows",
+      "sim",
+      "umbrella",
+      "portal",
+      "portal:timeline",
+      "portal:diff",
+      "portal:replay",
+      "planetary",
+      "planetary:tick",
+      "planetary:entropy",
+    ]);
+
+    if (!allowedLanes.has(envelope.lane)) {
+      return {
+        ok: false,
+        error: {
+          code: "STRICT_ENVELOPE_UNKNOWN_LANE",
+          message: `Unknown or disallowed lane: ${envelope.lane}`,
+        },
+      };
+    }
+
+    return { ok: true };
+  }
+
+  // ------------------------------------------------------------
   // ⭐ Phase‑12 Quantum Entropy Computation
   // ------------------------------------------------------------
   private computeQuantumEntropy(): void {
@@ -133,9 +240,6 @@ export class PortalKernel {
   private async verifyIdentity(identityToken?: string): Promise<IdentityContext | null> {
     if (!identityToken) return null;
 
-    // In a real implementation, verify JWT using env.IDENTITY_JWT_SECRET,
-    // env.IDENTITY_JWT_ISSUER, env.IDENTITY_JWT_AUDIENCE.
-    // Here we stub a strict-mode identity context.
     return {
       subject: "phase12-user",
       roles: ["planetary-operator"],
@@ -159,12 +263,10 @@ export class PortalKernel {
     const mode = this.env.UMBRELLA_ENFORCEMENT ?? "strict";
     if (mode !== "strict") return;
 
-    // Identity required for non-identity lanes
     if (lane !== "identity" && !identity) {
       throw new Error("UmbrellaStrict: identity required for non-identity lane");
     }
 
-    // Planetary mutations require governance meta
     const highImpactPlanetaryOps = ["mutate", "reset", "fork", "inject"];
     if (
       lane.startsWith("planetary") &&
@@ -177,7 +279,6 @@ export class PortalKernel {
       );
     }
 
-    // Replay / diff lanes require identity with operator role
     if (
       (lane === "portal:replay" || lane === "portal:diff") &&
       (!identity || !identity.roles.includes("planetary-operator"))
@@ -216,6 +317,18 @@ export class PortalKernel {
             code: "INVALID_ENVELOPE",
             message: "Kernel envelope must be valid JSON",
           },
+        },
+        { status: 400 }
+      );
+    }
+
+    // ⭐ Strict envelope validation
+    const strictCheck = this.validateEnvelopeStrict(envelope);
+    if (!strictCheck.ok) {
+      return Response.json(
+        {
+          ok: false,
+          error: strictCheck.error,
         },
         { status: 400 }
       );
@@ -267,7 +380,6 @@ export class PortalKernel {
       case "portal:replay":
         return this.handlePortalReplay(payload);
 
-      // ⭐ Phase‑12 planetary routes
       case "planetary":
         return Response.json(toPlanetaryEnvelope(this.planetary));
 
@@ -617,71 +729,3 @@ export class PortalKernel {
     return Response.json(toPortalDiffEnvelope(diff));
   }
 
-  // ------------------------------------------------------------
-  // ⭐ Replay engine lane
-  // ------------------------------------------------------------
-  async handlePortalReplay(payload: JsonObject): Promise<Response> {
-    const eventId = payload.eventId ?? null;
-
-    const timeline = await this.loadTimeline();
-    const surface = await this.replaySurfaceUntil(eventId);
-
-    return Response.json({
-      ok: true,
-      lane: "portal:replay",
-      eventId,
-      surface: toPortalEnvelope(surface),
-    });
-  }
-
-  // ------------------------------------------------------------
-  // Replay engine core
-  // ------------------------------------------------------------
-  async replaySurfaceUntil(eventId: string): Promise<PortalSurfaceState> {
-    const timeline = await this.loadTimeline();
-    let surface = createEmptyPortalSurfaceState();
-
-    for (const event of timeline.events) {
-      const { action, panel, payload } = event;
-
-      switch (action) {
-        case "open":
-          surface = openPanel(surface, {
-            id: panel!,
-            title: payload.title ?? panel,
-            x: payload.x ?? 100,
-            y: payload.y ?? 100,
-            width: payload.width ?? 300,
-            height: payload.height ?? 200,
-            visible: true,
-          });
-          break;
-
-        case "close":
-          surface = closePanel(surface, panel!);
-          break;
-
-        case "move":
-          surface = movePanel(surface, panel!, payload.x, payload.y);
-          break;
-
-        case "resize":
-          surface = resizePanel(
-            surface,
-            panel!,
-            payload.width,
-            payload.height
-          );
-          break;
-
-        case "toggle":
-          surface = togglePanel(surface, panel!, payload.visible);
-          break;
-      }
-
-      if (event.id === eventId) break;
-    }
-
-    return surface;
-  }
-}
