@@ -73,3 +73,6 @@ api.post("/portal/canon", async (c) => {
 });
 
 export default api;
+export { PortalKernel } from "./do/PortalKernel";
+export { new_sqlite_classes } from "./do/new_sqlite_classes";
+
