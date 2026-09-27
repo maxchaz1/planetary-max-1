@@ -907,4 +907,4 @@ export class PortalKernel {
 
     return surface;
   }
-}
+
