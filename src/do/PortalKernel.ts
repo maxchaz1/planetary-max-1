@@ -860,7 +860,7 @@ export class PortalKernel {
   // ------------------------------------------------------------
   // Replay engine core
   // ------------------------------------------------------------
-  async replaySurfaceUntil(eventId: string | null): Promise<PortalSurfaceState> {
+   async replaySurfaceUntil(eventId: string | null): Promise<PortalSurfaceState> {
     const timeline = await this.loadTimeline();
     let surface = createEmptyPortalSurfaceState();
 
@@ -907,4 +907,4 @@ export class PortalKernel {
 
     return surface;
   }
-
+} // ← close PortalKernel class
