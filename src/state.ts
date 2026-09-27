@@ -1,58 +1,96 @@
-//
-// Portal‑OS Unified State Substrate
-// OS-level envelope + versioning + planetary mode
-//
+// planetary-max/src/state.ts
+// Portal‑OS v12 — Kernel State Envelope + Phase‑12 Quantum Entropy
 
 import type { JsonObject } from "./contracts";
-import type { WindowManagerState } from "./windows";
-import type { PortalSurfaceState } from "./portal";
+import type { PlanetaryState } from "./planetary";
 
-/**
- * PortalOsState
- *
- * Unified OS state returned by the kernel.
- */
-export type PortalOsState = {
-  version: string;
-  planetaryMode: "single" | "planetary";
-  windows: WindowManagerState;
-  portal: PortalSurfaceState;
-  metadata: JsonObject;
-};
+// ------------------------------------------------------------
+// KernelStateEnvelope — top-level state returned to clients
+// ------------------------------------------------------------
+export interface KernelStateEnvelope {
+  ok: boolean;
 
-/**
- * createEmptyPortalOsState
- *
- * Base OS state when Portal‑OS boots.
- */
-export function createEmptyPortalOsState(
-  windows: WindowManagerState,
-  portal: PortalSurfaceState,
-  version: string | undefined,
-  planetaryMode: "single" | "planetary" | undefined,
-): PortalOsState {
-  return {
-    version: version ?? "0.0.0",
-    planetaryMode: planetaryMode ?? "single",
-    windows,
-    portal,
-    metadata: {},
+  // Identity lane
+  identity?: {
+    id: string;
+    echo: JsonObject;
   };
+
+  // Windows lane
+  windows?: {
+    action: string;
+    window: string | null;
+  };
+
+  // SIM lane
+  sim?: {
+    mode: string;
+    echo: JsonObject;
+  };
+
+  // Umbrella lane
+  umbrella?: {
+    mode: string;
+    echo: JsonObject;
+  };
+
+  // Portal lane
+  portal?: JsonObject;
+
+  // Portal timeline
+  timeline?: JsonObject;
+
+  // Portal diff
+  diff?: JsonObject;
+
+  // Portal replay
+  replay?: JsonObject;
+
+  // Phase‑12 planetary substrate
+  planetary?: PlanetaryState;
 }
 
-/**
- * toOsEnvelope
- *
- * Converts internal OS state into a public JSON envelope.
- */
-export function toOsEnvelope(state: PortalOsState): JsonObject {
+// ------------------------------------------------------------
+// toKernelStateEnvelope — normalize DO responses
+// ------------------------------------------------------------
+export function toKernelStateEnvelope(obj: JsonObject): KernelStateEnvelope {
   return {
-    ok: true,
-    service: "PORTAL-OS",
-    version: state.version,
-    planetaryMode: state.planetaryMode,
-    windows: state.windows,
-    portal: state.portal,
-    metadata: state.metadata,
+    ok: obj.ok ?? true,
+
+    identity: obj.identity
+      ? {
+          id: obj.id ?? "",
+          echo: obj.echo ?? {},
+        }
+      : undefined,
+
+    windows: obj.window
+      ? {
+          action: obj.action ?? "noop",
+          window: obj.window ?? null,
+        }
+      : undefined,
+
+    sim: obj.sim
+      ? {
+          mode: obj.sim.mode ?? "single",
+          echo: obj.sim.echo ?? {},
+        }
+      : undefined,
+
+    umbrella: obj.governance
+      ? {
+          mode: obj.governance.mode ?? "strict",
+          echo: obj.governance.echo ?? {},
+        }
+      : undefined,
+
+    portal: obj.surface ?? undefined,
+    timeline: obj.timeline ?? undefined,
+    diff: obj.diff ?? undefined,
+    replay: obj.replay ?? undefined,
+
+    // Phase‑12 planetary substrate
+    planetary: obj.planetary ?? undefined,
   };
 }
