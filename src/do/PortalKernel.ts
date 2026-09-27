@@ -1123,7 +1123,6 @@ export class PortalKernel {
       updatedAt: node.updatedAt,
     };
   }
-
   // ------------------------------------------------------------
   // ⭐ Phase‑12 Governed Planetary Ops (Full Expanded Block)
   // ------------------------------------------------------------
@@ -1136,17 +1135,13 @@ export class PortalKernel {
     payload: JsonObject,
     identity: IdentityContext
   ) {
-    // Governor role required
     if (!identity.roles.includes("planetary-governor")) {
       throw new Error("UmbrellaStrict: governor role required for injection");
     }
 
     const node = this.getNode(nodeId);
-    if (!node) {
-      throw new Error("PLANETARY_NODE_NOT_FOUND");
-    }
+    if (!node) throw new Error("PLANETARY_NODE_NOT_FOUND");
 
-    // Apply injection
     Object.assign(node.state, payload);
 
     node.updatedAt = Date.now();
@@ -1154,10 +1149,8 @@ export class PortalKernel {
     node.signatureDrift += 0.02;
     node.coherenceLoss += this.planetary.quantumEntropy * 0.01;
 
-    // Update canonical substrate
     this.updateCanonicalSubstrate();
 
-    // Advisory
     this.planetary.advisories.push({
       id: crypto.randomUUID(),
       timestamp: Date.now(),
@@ -1183,9 +1176,7 @@ export class PortalKernel {
     }
 
     const node = this.getNode(nodeId);
-    if (!node) {
-      throw new Error("PLANETARY_NODE_NOT_FOUND");
-    }
+    if (!node) throw new Error("PLANETARY_NODE_NOT_FOUND");
 
     const fork = {
       ...node,
@@ -1200,7 +1191,6 @@ export class PortalKernel {
     };
 
     this.planetary.nodes.push(fork);
-
     this.updateCanonicalSubstrate();
 
     this.planetary.advisories.push({
@@ -1228,9 +1218,7 @@ export class PortalKernel {
     }
 
     const node = this.getNode(nodeId);
-    if (!node) {
-      throw new Error("PLANETARY_NODE_NOT_FOUND");
-    }
+    if (!node) throw new Error("PLANETARY_NODE_NOT_FOUND");
 
     node.state = {};
     node.divergence = 0;
@@ -1293,10 +1281,7 @@ export class PortalKernel {
     const nodeB = canon[b];
 
     if (!nodeA || !nodeB) {
-      return {
-        ok: false,
-        error: "CANON_DIFF_NODE_NOT_FOUND",
-      };
+      return { ok: false, error: "CANON_DIFF_NODE_NOT_FOUND" };
     }
 
     const diff: Record<string, any> = {};
@@ -1305,18 +1290,10 @@ export class PortalKernel {
     for (const key of keys) {
       const valA = nodeA.state[key];
       const valB = nodeB.state[key];
-
-      if (valA !== valB) {
-        diff[key] = { from: valA, to: valB };
-      }
+      if (valA !== valB) diff[key] = { from: valA, to: valB };
     }
 
-    return {
-      ok: true,
-      from: a,
-      to: b,
-      diff,
-    };
+    return { ok: true, from: a, to: b, diff };
   }
 
   // ------------------------------------------------------------
@@ -1324,12 +1301,7 @@ export class PortalKernel {
   // ------------------------------------------------------------
   private globalSubstrateReplay(nodeId: string) {
     const node = this.getNode(nodeId);
-    if (!node) {
-      return {
-        ok: false,
-        error: "CANON_REPLAY_NODE_NOT_FOUND",
-      };
-    }
+    if (!node) return { ok: false, error: "CANON_REPLAY_NODE_NOT_FOUND" };
 
     return {
       ok: true,
@@ -1354,10 +1326,7 @@ export class PortalKernel {
     const nodeB = canon[forkId];
 
     if (!nodeA || !nodeB) {
-      return {
-        ok: false,
-        error: "CANON_FORK_REPLAY_NODE_NOT_FOUND",
-      };
+      return { ok: false, error: "CANON_FORK_REPLAY_NODE_NOT_FOUND" };
     }
 
     return {
@@ -1374,6 +1343,7 @@ export class PortalKernel {
       },
     };
   }
+
   // ------------------------------------------------------------
   // ⭐ Phase‑12 Planetary Ops Router (Expanded)
   // ------------------------------------------------------------
@@ -1385,9 +1355,6 @@ export class PortalKernel {
     const op = payload.op ?? null;
 
     switch (op) {
-      // --------------------------------------------------------
-      // Governed Injection
-      // --------------------------------------------------------
       case "inject": {
         const nodeId = payload.node;
         const data = payload.data ?? {};
@@ -1404,9 +1371,6 @@ export class PortalKernel {
         });
       }
 
-      // --------------------------------------------------------
-      // Governed Fork
-      // --------------------------------------------------------
       case "fork": {
         const nodeId = payload.node;
         const forkId = payload.fork;
@@ -1424,9 +1388,6 @@ export class PortalKernel {
         });
       }
 
-      // --------------------------------------------------------
-      // Governed Reset
-      // --------------------------------------------------------
       case "reset": {
         const nodeId = payload.node;
         const node = this.governedPlanetaryReset(nodeId, identity);
@@ -1442,12 +1403,9 @@ export class PortalKernel {
         });
       }
 
-      // --------------------------------------------------------
-      // Governed Entropy Override
-      // --------------------------------------------------------
       case "entropy": {
         const value = payload.value ?? 0;
-        const result = this.governedEntropyOverride(value, identity);
+        this.governedEntropyOverride(value, identity);
 
         return Response.json({
           ok: true,
@@ -1459,13 +1417,9 @@ export class PortalKernel {
         });
       }
 
-      // --------------------------------------------------------
-      // Global Substrate Diff
-      // --------------------------------------------------------
       case "canon:diff": {
         const a = payload.from;
         const b = payload.to;
-
         const diff = this.globalSubstrateDiff(a, b);
 
         return Response.json({
@@ -1479,9 +1433,6 @@ export class PortalKernel {
         });
       }
 
-      // --------------------------------------------------------
-      // Global Substrate Replay
-      // --------------------------------------------------------
       case "canon:replay": {
         const nodeId = payload.node;
         const replay = this.globalSubstrateReplay(nodeId);
@@ -1495,13 +1446,9 @@ export class PortalKernel {
         });
       }
 
-      // --------------------------------------------------------
-      // Substrate Fork Replay
-      // --------------------------------------------------------
       case "canon:fork:replay": {
         const nodeId = payload.node;
         const forkId = payload.fork;
-
         const replay = this.globalSubstrateForkReplay(nodeId, forkId);
 
         return Response.json({
@@ -1513,9 +1460,6 @@ export class PortalKernel {
         });
       }
 
-      // --------------------------------------------------------
-      // Unknown op
-      // --------------------------------------------------------
       default:
         return Response.json(
           {
