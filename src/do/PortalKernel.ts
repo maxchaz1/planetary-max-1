@@ -229,9 +229,6 @@ export class PortalKernel {
   }
 
   // ------------------------------------------------------------
-  // ⭐ Identity verification (strict mode)
-  // ------------------------------------------------------------
-    // ------------------------------------------------------------
   // ⭐ JWT decode helper (no verification, just parsing)
   // ------------------------------------------------------------
   private decodeJwt(token: string): Record<string, unknown> | null {
@@ -240,7 +237,10 @@ export class PortalKernel {
 
     try {
       const payload = parts[1];
-      const padded = payload.padEnd(payload.length + (4 - (payload.length % 4)) % 4, "=");
+      const padded = payload.padEnd(
+        payload.length + (4 - (payload.length % 4)) % 4,
+        "="
+      );
       const json = atob(padded);
       return JSON.parse(json);
     } catch {
@@ -251,36 +251,113 @@ export class PortalKernel {
   // ------------------------------------------------------------
   // ⭐ Identity verification (Phase‑12 strict JWT)
   // ------------------------------------------------------------
-  private async verifyIdentity(identityToken?: string): Promise<IdentityContext | null> {
-    // (full JWT enforcement you already have)
-  }
-
-  private async verifyIdentity(identityToken?: string): Promise<IdentityContext | null> {
+  private async verifyIdentity(
+    identityToken?: string
+  ): Promise<IdentityContext | null> {
     if (!identityToken) return null;
 
+    const decoded = this.decodeJwt(identityToken);
+    if (!decoded) {
+      throw new Error("Identity: invalid JWT structure");
+    }
+
+    const issuer = decoded["iss"];
+    const audience = decoded["aud"];
+    const subject = decoded["sub"];
+    const exp = decoded["exp"];
+
+    if (typeof issuer !== "string" || issuer !== this.env.IDENTITY_JWT_ISSUER) {
+      throw new Error("Identity: invalid issuer");
+    }
+
+    if (
+      typeof audience !== "string" ||
+      audience !== this.env.IDENTITY_JWT_AUDIENCE
+    ) {
+      throw new Error("Identity: invalid audience");
+    }
+
+    if (typeof subject !== "string" || !subject.length) {
+      throw new Error("Identity: missing subject");
+    }
+
+    if (typeof exp !== "number" || Date.now() / 1000 >= exp) {
+      throw new Error("Identity: token expired");
+    }
+
+    const roles = Array.isArray(decoded["roles"])
+      ? (decoded["roles"] as string[])
+      : [];
+
+    this.planetary.identities[subject] = {
+      roles,
+      claims: decoded,
+    };
+
     return {
-      subject: "phase12-user",
-      roles: ["planetary-operator"],
-      claims: {
-        token: identityToken,
-        issuer: this.env.IDENTITY_JWT_ISSUER,
-        audience: this.env.IDENTITY_JWT_AUDIENCE,
-      },
+      subject,
+      roles,
+      claims: decoded,
     };
   }
 
   // ------------------------------------------------------------
-  // ⭐ Umbrella Strict governance
-  // ------------------------------------------------------------
-    // ------------------------------------------------------------
   // ⭐ Governance signature verification (Phase‑12)
   // ------------------------------------------------------------
   private async verifyGovernanceSignature(packet: JsonObject): Promise<void> {
-    // … entire block goes here …
+    const secret = this.env.GOVERNANCE_SECRET;
+    if (!secret) throw new Error("UmbrellaStrict: missing governance secret");
+
+    const signature = packet.signature;
+    if (typeof signature !== "string") {
+      throw new Error("UmbrellaStrict: governance packet missing signature");
+    }
+
+    if (this.planetary.signatureMap[signature]) {
+      throw new Error("UmbrellaStrict: governance packet replay detected");
+    }
+
+    const issuedAt = packet.issuedAt;
+    const expiresAt = packet.expiresAt;
+
+    if (typeof issuedAt !== "number" || typeof expiresAt !== "number") {
+      throw new Error("UmbrellaStrict: governance packet missing timestamps");
+    }
+
+    const now = Date.now();
+    if (now < issuedAt || now > expiresAt) {
+      throw new Error("UmbrellaStrict: governance packet expired");
+    }
+
+    const scope = packet.scope;
+    if (typeof scope !== "string") {
+      throw new Error("UmbrellaStrict: governance packet missing scope");
+    }
+
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+
+    const data = encoder.encode(`${issuedAt}:${expiresAt}:${scope}`);
+    const sigBytes = Uint8Array.from(atob(signature), (c) =>
+      c.charCodeAt(0)
+    );
+
+    const valid = await crypto.subtle.verify("HMAC", key, sigBytes, data);
+    if (!valid) {
+      throw new Error("UmbrellaStrict: invalid governance signature");
+    }
+
+    this.planetary.signatureMap[signature] = true;
   }
 
   // ------------------------------------------------------------
-  // ⭐ Umbrella Strict governance
+  // ⭐ UmbrellaStrict governance (Phase‑12 strict)
   // ------------------------------------------------------------
   private async enforceUmbrellaStrict(
     lane: string,
@@ -288,41 +365,40 @@ export class PortalKernel {
     identity: IdentityContext | null,
     payload: JsonObject
   ): Promise<void> {
-    // … your governance logic …
-  }
-
-  private enforceUmbrellaStrict(
-    lane: string,
-    op: string | undefined,
-    identity: IdentityContext | null,
-    payload: JsonObject
-  ): void {
     const mode = this.env.UMBRELLA_ENFORCEMENT ?? "strict";
     if (mode !== "strict") return;
 
     if (lane !== "identity" && !identity) {
-      throw new Error("UmbrellaStrict: identity required for non-identity lane");
-    }
-
-    const highImpactPlanetaryOps = ["mutate", "reset", "fork", "inject"];
-    if (
-      lane.startsWith("planetary") &&
-      op &&
-      highImpactPlanetaryOps.includes(op) &&
-      !payload.governance
-    ) {
-      throw new Error(
-        "UmbrellaStrict: planetary high-impact op requires governance payload"
-      );
+      throw new Error("UmbrellaStrict: identity required");
     }
 
     if (
       (lane === "portal:replay" || lane === "portal:diff") &&
       (!identity || !identity.roles.includes("planetary-operator"))
     ) {
-      throw new Error(
-        "UmbrellaStrict: replay/diff lanes require planetary-operator role"
-      );
+      throw new Error("UmbrellaStrict: operator role required");
+    }
+
+    const highImpactOps = ["mutate", "reset", "fork", "inject", "entropy"];
+    if (lane.startsWith("planetary") && op && highImpactOps.includes(op)) {
+      const governance = payload.governance;
+      if (!governance || typeof governance !== "object") {
+        throw new Error("UmbrellaStrict: governance packet required");
+      }
+
+      await this.verifyGovernanceSignature(governance);
+
+      if (!identity!.roles.includes("planetary-governor")) {
+        throw new Error("UmbrellaStrict: governor role required");
+      }
+
+      this.planetary.advisories.push({
+        id: crypto.randomUUID(),
+        timestamp: Date.now(),
+        op,
+        scope: (governance as any).scope,
+        issuedBy: identity!.subject,
+      });
     }
   }
 
@@ -359,7 +435,6 @@ export class PortalKernel {
       );
     }
 
-    // ⭐ Strict envelope validation
     const strictCheck = this.validateEnvelopeStrict(envelope);
     if (!strictCheck.ok) {
       return Response.json(
@@ -373,11 +448,10 @@ export class PortalKernel {
 
     const { id, lane, payload, identity: identityToken, op } = envelope;
 
-    // Strict identity + governance
     let identityCtx: IdentityContext | null = null;
     try {
       identityCtx = await this.verifyIdentity(identityToken);
-      this.enforceUmbrellaStrict(lane, op, identityCtx, payload);
+      await this.enforceUmbrellaStrict(lane, op, identityCtx, payload);
     } catch (err) {
       return Response.json(
         {
@@ -743,6 +817,26 @@ export class PortalKernel {
     if (!eventFrom || !eventTo) {
       return Response.json(
         {
+          ok: false,
+          error: {
+            code: "PORTAL_DIFF_EVENT_NOT_FOUND",
+            message: "One or both timeline events not found",
+          },
+        },
+        { status: 404 }
+      );
+    }
+
+    const surfaceBefore = await this.replaySurfaceUntil(fromId);
+    const surfaceAfter = await this.replaySurfaceUntil(toId);
+
+    const diff = computePortalDiff(
+      surfaceBefore,
+      surfaceAfter,
+      eventFrom,
+      eventTo
+    );
+
     return Response.json(toPortalDiffEnvelope(diff));
   }
 
@@ -766,7 +860,7 @@ export class PortalKernel {
   // ------------------------------------------------------------
   // Replay engine core
   // ------------------------------------------------------------
-  async replaySurfaceUntil(eventId: string): Promise<PortalSurfaceState> {
+  async replaySurfaceUntil(eventId: string | null): Promise<PortalSurfaceState> {
     const timeline = await this.loadTimeline();
     let surface = createEmptyPortalSurfaceState();
 
@@ -808,9 +902,9 @@ export class PortalKernel {
           break;
       }
 
-      if (event.id === eventId) break;
+      if (eventId && event.id === eventId) break;
     }
 
     return surface;
   }
-} // ← closes PortalKernel class
+}
