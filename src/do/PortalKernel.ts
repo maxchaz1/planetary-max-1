@@ -1,5 +1,5 @@
-// src/do/PortalKernel.ts
-// Portal‑OS v11 — Replay‑Enabled Kernel (based on user’s attached file)
+// planetary-max/src/do/PortalKernel.ts
+// Portal‑OS v12 — Replay‑Enabled Kernel + Phase‑12 Quantum Entropy
 
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import type { Bindings, KernelEnvelope, JsonObject } from "../contracts";
@@ -28,13 +28,89 @@ import {
   toPortalDiffEnvelope,
 } from "./PortalTimelineDiff";
 
+// Phase‑12 planetary substrate
+import {
+  type PlanetaryState,
+  toPlanetaryEnvelope,
+} from "../planetary";
+
 export class PortalKernel {
   state: DurableObjectState;
   env: Bindings;
 
+  // Phase‑12 planetary substrate
+  planetary: PlanetaryState;
+
   constructor(state: DurableObjectState, env: Bindings) {
     this.state = state;
     this.env = env;
+
+    // Initialize Phase‑12 planetary substrate
+    this.planetary = {
+      globalTick: 0,
+      nodes: [],
+      identities: {},
+      substrate: {},
+      quantum: {},
+      canon: {},
+      governance: {},
+      advisories: [],
+      synchronizedAt: Date.now(),
+      packetSignature: "EMPTY-PACKET",
+
+      // Phase‑12 Quantum Entropy Fields
+      quantumEntropy: 0,
+      entropyGradient: [],
+      coherenceField: [],
+      entanglementGraph: {},
+      signatureMap: {},
+      entropyTick: 0,
+    };
+  }
+
+  // ------------------------------------------------------------
+  // ⭐ Phase‑12 Quantum Entropy Computation
+  // ------------------------------------------------------------
+  private computeQuantumEntropy(): void {
+    const nodes = this.planetary.nodes;
+
+    const divergence = nodes.map(n => n.divergence ?? 0);
+    const signatureDrift = nodes.map(n => n.signatureDrift ?? 0);
+    const coherenceLoss = nodes.map(n => n.coherenceLoss ?? 0);
+
+    const avgNodeDivergence =
+      divergence.reduce((a, b) => a + b, 0) / (divergence.length || 1);
+
+    const avgSignatureDrift =
+      signatureDrift.reduce((a, b) => a + b, 0) / (signatureDrift.length || 1);
+
+    const avgCoherenceLoss =
+      coherenceLoss.reduce((a, b) => a + b, 0) / (coherenceLoss.length || 1);
+
+    const entanglementInstability =
+      Object.keys(this.planetary.entanglementGraph).length * 0.01;
+
+    const substrateNoise = Math.random() * 0.05;
+
+    this.planetary.quantumEntropy =
+      (avgNodeDivergence +
+        avgSignatureDrift +
+        avgCoherenceLoss +
+        entanglementInstability +
+        substrateNoise) / 5;
+
+    this.planetary.entropyGradient = divergence;
+    this.planetary.coherenceField = coherenceLoss;
+    this.planetary.entropyTick++;
+  }
+
+  // ------------------------------------------------------------
+  // ⭐ Phase‑12 planetary tick loop
+  // ------------------------------------------------------------
+  private planetaryTick(): void {
+    this.planetary.globalTick++;
+    this.computeQuantumEntropy();
+    this.planetary.synchronizedAt = Date.now();
   }
 
   // ------------------------------------------------------------
@@ -96,6 +172,27 @@ export class PortalKernel {
 
       case "portal:replay":
         return this.handlePortalReplay(payload);
+
+      // ⭐ Phase‑12 planetary routes
+      case "planetary":
+        return Response.json(toPlanetaryEnvelope(this.planetary));
+
+      case "planetary:tick":
+        this.planetaryTick();
+        return Response.json({
+          ok: true,
+          tick: this.planetary.globalTick,
+        });
+
+      case "planetary:entropy":
+        return Response.json({
+          entropy: this.planetary.quantumEntropy,
+          gradient: this.planetary.entropyGradient,
+          coherence: this.planetary.coherenceField,
+          entanglement: this.planetary.entanglementGraph,
+          signatures: this.planetary.signatureMap,
+          tick: this.planetary.entropyTick,
+        });
 
       default:
         return Response.json(
@@ -423,7 +520,7 @@ export class PortalKernel {
   }
 
   // ------------------------------------------------------------
-  // ⭐ Replay engine lane (added)
+  // ⭐ Replay engine lane
   // ------------------------------------------------------------
   async handlePortalReplay(payload: JsonObject): Promise<Response> {
     const eventId = payload.eventId ?? null;
