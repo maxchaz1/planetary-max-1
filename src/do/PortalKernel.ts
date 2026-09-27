@@ -231,6 +231,30 @@ export class PortalKernel {
   // ------------------------------------------------------------
   // ⭐ Identity verification (strict mode)
   // ------------------------------------------------------------
+    // ------------------------------------------------------------
+  // ⭐ JWT decode helper (no verification, just parsing)
+  // ------------------------------------------------------------
+  private decodeJwt(token: string): Record<string, unknown> | null {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+
+    try {
+      const payload = parts[1];
+      const padded = payload.padEnd(payload.length + (4 - (payload.length % 4)) % 4, "=");
+      const json = atob(padded);
+      return JSON.parse(json);
+    } catch {
+      return null;
+    }
+  }
+
+  // ------------------------------------------------------------
+  // ⭐ Identity verification (Phase‑12 strict JWT)
+  // ------------------------------------------------------------
+  private async verifyIdentity(identityToken?: string): Promise<IdentityContext | null> {
+    // (full JWT enforcement you already have)
+  }
+
   private async verifyIdentity(identityToken?: string): Promise<IdentityContext | null> {
     if (!identityToken) return null;
 
