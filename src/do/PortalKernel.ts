@@ -1374,4 +1374,159 @@ export class PortalKernel {
       },
     };
   }
+  // ------------------------------------------------------------
+  // ⭐ Phase‑12 Planetary Ops Router (Expanded)
+  // ------------------------------------------------------------
+  private async routePlanetaryOps(
+    id: string,
+    identity: IdentityContext,
+    payload: JsonObject
+  ): Promise<Response> {
+    const op = payload.op ?? null;
+
+    switch (op) {
+      // --------------------------------------------------------
+      // Governed Injection
+      // --------------------------------------------------------
+      case "inject": {
+        const nodeId = payload.node;
+        const data = payload.data ?? {};
+        const node = this.governedPlanetaryInject(nodeId, data, identity);
+
+        return Response.json({
+          ok: true,
+          lane: "planetary",
+          op: "inject",
+          id,
+          node: nodeId,
+          state: node.state,
+          canon: this.planetary.canon[nodeId],
+        });
+      }
+
+      // --------------------------------------------------------
+      // Governed Fork
+      // --------------------------------------------------------
+      case "fork": {
+        const nodeId = payload.node;
+        const forkId = payload.fork;
+        const fork = this.governedPlanetaryFork(nodeId, forkId, identity);
+
+        return Response.json({
+          ok: true,
+          lane: "planetary",
+          op: "fork",
+          id,
+          original: nodeId,
+          fork: forkId,
+          state: fork.state,
+          canon: this.planetary.canon[forkId],
+        });
+      }
+
+      // --------------------------------------------------------
+      // Governed Reset
+      // --------------------------------------------------------
+      case "reset": {
+        const nodeId = payload.node;
+        const node = this.governedPlanetaryReset(nodeId, identity);
+
+        return Response.json({
+          ok: true,
+          lane: "planetary",
+          op: "reset",
+          id,
+          node: nodeId,
+          state: node.state,
+          canon: this.planetary.canon[nodeId],
+        });
+      }
+
+      // --------------------------------------------------------
+      // Governed Entropy Override
+      // --------------------------------------------------------
+      case "entropy": {
+        const value = payload.value ?? 0;
+        const result = this.governedEntropyOverride(value, identity);
+
+        return Response.json({
+          ok: true,
+          lane: "planetary",
+          op: "entropy",
+          id,
+          entropy: this.planetary.quantumEntropy,
+          tick: this.planetary.entropyTick,
+        });
+      }
+
+      // --------------------------------------------------------
+      // Global Substrate Diff
+      // --------------------------------------------------------
+      case "canon:diff": {
+        const a = payload.from;
+        const b = payload.to;
+
+        const diff = this.globalSubstrateDiff(a, b);
+
+        return Response.json({
+          ok: diff.ok,
+          lane: "planetary",
+          op: "canon:diff",
+          id,
+          from: a,
+          to: b,
+          diff,
+        });
+      }
+
+      // --------------------------------------------------------
+      // Global Substrate Replay
+      // --------------------------------------------------------
+      case "canon:replay": {
+        const nodeId = payload.node;
+        const replay = this.globalSubstrateReplay(nodeId);
+
+        return Response.json({
+          ok: replay.ok,
+          lane: "planetary",
+          op: "canon:replay",
+          id,
+          replay,
+        });
+      }
+
+      // --------------------------------------------------------
+      // Substrate Fork Replay
+      // --------------------------------------------------------
+      case "canon:fork:replay": {
+        const nodeId = payload.node;
+        const forkId = payload.fork;
+
+        const replay = this.globalSubstrateForkReplay(nodeId, forkId);
+
+        return Response.json({
+          ok: replay.ok,
+          lane: "planetary",
+          op: "canon:fork:replay",
+          id,
+          replay,
+        });
+      }
+
+      // --------------------------------------------------------
+      // Unknown op
+      // --------------------------------------------------------
+      default:
+        return Response.json(
+          {
+            ok: false,
+            error: {
+              code: "PLANETARY_OP_UNKNOWN",
+              message: `Unknown planetary op: ${op}`,
+            },
+          },
+          { status: 400 }
+        );
+    }
+  }
 
