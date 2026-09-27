@@ -52,14 +52,12 @@ export class PortalKernel {
   state: DurableObjectState;
   env: Bindings;
 
-  // Phase‑12 planetary substrate
   planetary: PlanetaryState;
 
   constructor(state: DurableObjectState, env: Bindings) {
     this.state = state;
     this.env = env;
 
-    // Initialize Phase‑12 planetary substrate
     this.planetary = {
       globalTick: 0,
       nodes: [],
@@ -72,7 +70,6 @@ export class PortalKernel {
       synchronizedAt: Date.now(),
       packetSignature: "EMPTY-PACKET",
 
-      // Phase‑12 Quantum Entropy Fields
       quantumEntropy: 0,
       entropyGradient: [],
       coherenceField: [],
@@ -85,10 +82,7 @@ export class PortalKernel {
   // ------------------------------------------------------------
   // ⭐ Strict Envelope Validation (Phase‑12)
   // ------------------------------------------------------------
-  private validateEnvelopeStrict(envelope: KernelEnvelope): {
-    ok: boolean;
-    error?: { code: string; message: string };
-  } {
+  private validateEnvelopeStrict(envelope: KernelEnvelope) {
     const required = ["id", "lane", "op", "payload"];
     for (const field of required) {
       if (!(field in envelope)) {
@@ -706,26 +700,3 @@ export class PortalKernel {
     if (!eventFrom || !eventTo) {
       return Response.json(
         {
-          ok: false,
-          error: {
-            code: "PORTAL_DIFF_EVENT_NOT_FOUND",
-            message: "One or both timeline events not found",
-          },
-        },
-        { status: 404 }
-      );
-    }
-
-    const surfaceBefore = await this.replaySurfaceUntil(fromId);
-    const surfaceAfter = await this.replaySurfaceUntil(toId);
-
-    const diff = computePortalDiff(
-      surfaceBefore,
-      surfaceAfter,
-      eventFrom,
-      eventTo
-    );
-
-    return Response.json(toPortalDiffEnvelope(diff));
-  }
-
