@@ -1018,5 +1018,110 @@ export class PortalKernel {
       entropy: this.planetary.quantumEntropy,
     };
   }
+  // ------------------------------------------------------------
+  // ⭐ Phase‑12 Canonical Substrate Engine
+  // ------------------------------------------------------------
+
+  private computeCanonicalSignature(node: any): string {
+    const base = `${node.id}:${node.updatedAt}:${node.divergence}:${node.signatureDrift}`;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(base);
+
+    // Simple deterministic hash for canonical signature
+    let hash = 0;
+    for (let i = 0; i < data.length; i++) {
+      hash = (hash * 31 + data[i]) >>> 0;
+    }
+
+    return hash.toString(16);
+  }
+
+  private updateCanonicalSubstrate() {
+    const substrate: Record<string, any> = {};
+
+    for (const node of this.planetary.nodes) {
+      const signature = this.computeCanonicalSignature(node);
+
+      substrate[node.id] = {
+        id: node.id,
+        signature,
+        divergence: node.divergence,
+        coherenceLoss: node.coherenceLoss,
+        signatureDrift: node.signatureDrift,
+        entangledWith: node.entangledWith,
+        identity: node.identity,
+        updatedAt: node.updatedAt,
+        state: node.state,
+      };
+
+      // Track canonical signature map
+      this.planetary.signatureMap[node.id] = signature;
+    }
+
+    this.planetary.canon = substrate;
+    this.planetary.synchronizedAt = Date.now();
+  }
+
+  private injectCanonicalState(nodeId: string, payload: JsonObject) {
+    const node = this.getNode(nodeId);
+    if (!node) return null;
+
+    Object.assign(node.state, payload);
+    node.updatedAt = Date.now();
+    node.divergence += 0.03;
+    node.signatureDrift += 0.01;
+
+    this.updateCanonicalSubstrate();
+    return node;
+  }
+
+  private diffCanonicalSubstrate(a: string, b: string) {
+    const canon = this.planetary.canon;
+
+    const nodeA = canon[a];
+    const nodeB = canon[b];
+
+    if (!nodeA || !nodeB) {
+      return {
+        ok: false,
+        error: "CANON_DIFF_NODE_NOT_FOUND",
+      };
+    }
+
+    const diff: Record<string, any> = {};
+
+    const keys = new Set([...Object.keys(nodeA.state), ...Object.keys(nodeB.state)]);
+    for (const key of keys) {
+      const valA = nodeA.state[key];
+      const valB = nodeB.state[key];
+
+      if (valA !== valB) {
+        diff[key] = { from: valA, to: valB };
+      }
+    }
+
+    return {
+      ok: true,
+      from: a,
+      to: b,
+      diff,
+    };
+  }
+
+  private replayCanonicalSubstrate(nodeId: string) {
+    const node = this.getNode(nodeId);
+    if (!node) return null;
+
+    return {
+      id: node.id,
+      state: node.state,
+      signature: this.computeCanonicalSignature(node),
+      divergence: node.divergence,
+      coherenceLoss: node.coherenceLoss,
+      signatureDrift: node.signatureDrift,
+      entangledWith: node.entangledWith,
+      updatedAt: node.updatedAt,
+    };
+  }
 
 
