@@ -1,5 +1,5 @@
 // planetary-max/src/do/PortalKernel.ts
-// Portal‑OS v12 — Replay‑Enabled Kernel + Phase‑12 Quantum Entropy
+// Portal‑OS v12 — Strict Mode Kernel + Phase‑12 Quantum Entropy + Replay
 
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import type { Bindings, KernelEnvelope, JsonObject } from "../contracts";
@@ -33,6 +33,20 @@ import {
   type PlanetaryState,
   toPlanetaryEnvelope,
 } from "../planetary";
+
+// ------------------------------------------------------------
+// Identity + governance types
+// ------------------------------------------------------------
+
+interface IdentityContext {
+  subject: string;
+  roles: string[];
+  claims: Record<string, unknown>;
+}
+
+// ------------------------------------------------------------
+// PortalKernel Durable Object
+// ------------------------------------------------------------
 
 export class PortalKernel {
   state: DurableObjectState;
@@ -74,9 +88,9 @@ export class PortalKernel {
   private computeQuantumEntropy(): void {
     const nodes = this.planetary.nodes;
 
-    const divergence = nodes.map(n => n.divergence ?? 0);
-    const signatureDrift = nodes.map(n => n.signatureDrift ?? 0);
-    const coherenceLoss = nodes.map(n => n.coherenceLoss ?? 0);
+    const divergence = nodes.map((n) => n.divergence ?? 0);
+    const signatureDrift = nodes.map((n) => n.signatureDrift ?? 0);
+    const coherenceLoss = nodes.map((n) => n.coherenceLoss ?? 0);
 
     const avgNodeDivergence =
       divergence.reduce((a, b) => a + b, 0) / (divergence.length || 1);
@@ -114,7 +128,68 @@ export class PortalKernel {
   }
 
   // ------------------------------------------------------------
-  // Main fetch handler
+  // ⭐ Identity verification (strict mode)
+  // ------------------------------------------------------------
+  private async verifyIdentity(identityToken?: string): Promise<IdentityContext | null> {
+    if (!identityToken) return null;
+
+    // In a real implementation, verify JWT using env.IDENTITY_JWT_SECRET,
+    // env.IDENTITY_JWT_ISSUER, env.IDENTITY_JWT_AUDIENCE.
+    // Here we stub a strict-mode identity context.
+    return {
+      subject: "phase12-user",
+      roles: ["planetary-operator"],
+      claims: {
+        token: identityToken,
+        issuer: this.env.IDENTITY_JWT_ISSUER,
+        audience: this.env.IDENTITY_JWT_AUDIENCE,
+      },
+    };
+  }
+
+  // ------------------------------------------------------------
+  // ⭐ Umbrella Strict governance
+  // ------------------------------------------------------------
+  private enforceUmbrellaStrict(
+    lane: string,
+    op: string | undefined,
+    identity: IdentityContext | null,
+    payload: JsonObject
+  ): void {
+    const mode = this.env.UMBRELLA_ENFORCEMENT ?? "strict";
+    if (mode !== "strict") return;
+
+    // Identity required for non-identity lanes
+    if (lane !== "identity" && !identity) {
+      throw new Error("UmbrellaStrict: identity required for non-identity lane");
+    }
+
+    // Planetary mutations require governance meta
+    const highImpactPlanetaryOps = ["mutate", "reset", "fork", "inject"];
+    if (
+      lane.startsWith("planetary") &&
+      op &&
+      highImpactPlanetaryOps.includes(op) &&
+      !payload.governance
+    ) {
+      throw new Error(
+        "UmbrellaStrict: planetary high-impact op requires governance payload"
+      );
+    }
+
+    // Replay / diff lanes require identity with operator role
+    if (
+      (lane === "portal:replay" || lane === "portal:diff") &&
+      (!identity || !identity.roles.includes("planetary-operator"))
+    ) {
+      throw new Error(
+        "UmbrellaStrict: replay/diff lanes require planetary-operator role"
+      );
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Main fetch handler (strict mode)
   // ------------------------------------------------------------
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "POST") {
@@ -146,23 +221,42 @@ export class PortalKernel {
       );
     }
 
-    const { id, lane, payload, identity } = envelope;
+    const { id, lane, payload, identity: identityToken, op } = envelope;
+
+    // Strict identity + governance
+    let identityCtx: IdentityContext | null = null;
+    try {
+      identityCtx = await this.verifyIdentity(identityToken);
+      this.enforceUmbrellaStrict(lane, op, identityCtx, payload);
+    } catch (err) {
+      return Response.json(
+        {
+          ok: false,
+          error: {
+            code: "UMBRELLA_STRICT_VIOLATION",
+            message:
+              err instanceof Error ? err.message : "Umbrella strict violation",
+          },
+        },
+        { status: 403 }
+      );
+    }
 
     switch (lane) {
       case "identity":
-        return this.handleIdentity(id, identity, payload);
+        return this.handleIdentity(id, identityToken ?? "", payload);
 
       case "windows":
-        return this.handleWindows(id, identity, payload);
+        return this.handleWindows(id, identityToken ?? "", payload);
 
       case "sim":
-        return this.handleSim(id, identity, payload);
+        return this.handleSim(id, identityToken ?? "", payload);
 
       case "umbrella":
-        return this.handleUmbrella(id, identity, payload);
+        return this.handleUmbrella(id, identityToken ?? "", payload);
 
       case "portal":
-        return this.handlePortal(id, identity, payload);
+        return this.handlePortal(id, identityToken ?? "", payload);
 
       case "portal:timeline":
         return this.handlePortalTimeline();
@@ -181,11 +275,15 @@ export class PortalKernel {
         this.planetaryTick();
         return Response.json({
           ok: true,
+          lane: "planetary:tick",
           tick: this.planetary.globalTick,
+          entropy: this.planetary.quantumEntropy,
         });
 
       case "planetary:entropy":
         return Response.json({
+          ok: true,
+          lane: "planetary:entropy",
           entropy: this.planetary.quantumEntropy,
           gradient: this.planetary.entropyGradient,
           coherence: this.planetary.coherenceField,
