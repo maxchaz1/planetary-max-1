@@ -272,6 +272,25 @@ export class PortalKernel {
   // ------------------------------------------------------------
   // ⭐ Umbrella Strict governance
   // ------------------------------------------------------------
+    // ------------------------------------------------------------
+  // ⭐ Governance signature verification (Phase‑12)
+  // ------------------------------------------------------------
+  private async verifyGovernanceSignature(packet: JsonObject): Promise<void> {
+    // … entire block goes here …
+  }
+
+  // ------------------------------------------------------------
+  // ⭐ Umbrella Strict governance
+  // ------------------------------------------------------------
+  private async enforceUmbrellaStrict(
+    lane: string,
+    op: string | undefined,
+    identity: IdentityContext | null,
+    payload: JsonObject
+  ): Promise<void> {
+    // … your governance logic …
+  }
+
   private enforceUmbrellaStrict(
     lane: string,
     op: string | undefined,
