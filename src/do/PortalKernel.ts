@@ -1124,4 +1124,254 @@ export class PortalKernel {
     };
   }
 
+  // ------------------------------------------------------------
+  // ⭐ Phase‑12 Governed Planetary Ops (Full Expanded Block)
+  // ------------------------------------------------------------
+
+  // ------------------------------------------------------------
+  // Planetary Injection (governed)
+  // ------------------------------------------------------------
+  private governedPlanetaryInject(
+    nodeId: string,
+    payload: JsonObject,
+    identity: IdentityContext
+  ) {
+    // Governor role required
+    if (!identity.roles.includes("planetary-governor")) {
+      throw new Error("UmbrellaStrict: governor role required for injection");
+    }
+
+    const node = this.getNode(nodeId);
+    if (!node) {
+      throw new Error("PLANETARY_NODE_NOT_FOUND");
+    }
+
+    // Apply injection
+    Object.assign(node.state, payload);
+
+    node.updatedAt = Date.now();
+    node.divergence += 0.05;
+    node.signatureDrift += 0.02;
+    node.coherenceLoss += this.planetary.quantumEntropy * 0.01;
+
+    // Update canonical substrate
+    this.updateCanonicalSubstrate();
+
+    // Advisory
+    this.planetary.advisories.push({
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      op: "inject",
+      scope: "planetary.inject",
+      issuedBy: identity.subject,
+      node: nodeId,
+    });
+
+    return node;
+  }
+
+  // ------------------------------------------------------------
+  // Planetary Fork (governed)
+  // ------------------------------------------------------------
+  private governedPlanetaryFork(
+    nodeId: string,
+    newId: string,
+    identity: IdentityContext
+  ) {
+    if (!identity.roles.includes("planetary-governor")) {
+      throw new Error("UmbrellaStrict: governor role required for fork");
+    }
+
+    const node = this.getNode(nodeId);
+    if (!node) {
+      throw new Error("PLANETARY_NODE_NOT_FOUND");
+    }
+
+    const fork = {
+      ...node,
+      id: newId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      divergence: node.divergence * 0.5,
+      coherenceLoss: node.coherenceLoss * 0.5,
+      signatureDrift: node.signatureDrift * 0.5,
+      entangledWith: [...node.entangledWith],
+      state: { ...node.state },
+    };
+
+    this.planetary.nodes.push(fork);
+
+    this.updateCanonicalSubstrate();
+
+    this.planetary.advisories.push({
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      op: "fork",
+      scope: "planetary.fork",
+      issuedBy: identity.subject,
+      node: nodeId,
+      fork: newId,
+    });
+
+    return fork;
+  }
+
+  // ------------------------------------------------------------
+  // Planetary Reset (governed)
+  // ------------------------------------------------------------
+  private governedPlanetaryReset(
+    nodeId: string,
+    identity: IdentityContext
+  ) {
+    if (!identity.roles.includes("planetary-governor")) {
+      throw new Error("UmbrellaStrict: governor role required for reset");
+    }
+
+    const node = this.getNode(nodeId);
+    if (!node) {
+      throw new Error("PLANETARY_NODE_NOT_FOUND");
+    }
+
+    node.state = {};
+    node.divergence = 0;
+    node.coherenceLoss = 0;
+    node.signatureDrift = 0;
+    node.entangledWith = [];
+    node.updatedAt = Date.now();
+
+    this.updateCanonicalSubstrate();
+
+    this.planetary.advisories.push({
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      op: "reset",
+      scope: "planetary.reset",
+      issuedBy: identity.subject,
+      node: nodeId,
+    });
+
+    return node;
+  }
+
+  // ------------------------------------------------------------
+  // Entropy Governance (Phase‑12)
+  // ------------------------------------------------------------
+  private governedEntropyOverride(
+    value: number,
+    identity: IdentityContext
+  ) {
+    if (!identity.roles.includes("planetary-governor")) {
+      throw new Error("UmbrellaStrict: governor role required for entropy override");
+    }
+
+    this.planetary.quantumEntropy = value;
+    this.planetary.entropyTick++;
+    this.planetary.synchronizedAt = Date.now();
+
+    this.planetary.advisories.push({
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      op: "entropy",
+      scope: "planetary.entropy.override",
+      issuedBy: identity.subject,
+      value,
+    });
+
+    return {
+      ok: true,
+      entropy: value,
+    };
+  }
+
+  // ------------------------------------------------------------
+  // Global Substrate Diff Engine
+  // ------------------------------------------------------------
+  private globalSubstrateDiff(a: string, b: string) {
+    const canon = this.planetary.canon;
+
+    const nodeA = canon[a];
+    const nodeB = canon[b];
+
+    if (!nodeA || !nodeB) {
+      return {
+        ok: false,
+        error: "CANON_DIFF_NODE_NOT_FOUND",
+      };
+    }
+
+    const diff: Record<string, any> = {};
+    const keys = new Set([...Object.keys(nodeA.state), ...Object.keys(nodeB.state)]);
+
+    for (const key of keys) {
+      const valA = nodeA.state[key];
+      const valB = nodeB.state[key];
+
+      if (valA !== valB) {
+        diff[key] = { from: valA, to: valB };
+      }
+    }
+
+    return {
+      ok: true,
+      from: a,
+      to: b,
+      diff,
+    };
+  }
+
+  // ------------------------------------------------------------
+  // Global Substrate Replay Engine
+  // ------------------------------------------------------------
+  private globalSubstrateReplay(nodeId: string) {
+    const node = this.getNode(nodeId);
+    if (!node) {
+      return {
+        ok: false,
+        error: "CANON_REPLAY_NODE_NOT_FOUND",
+      };
+    }
+
+    return {
+      ok: true,
+      id: node.id,
+      state: node.state,
+      signature: this.computeCanonicalSignature(node),
+      divergence: node.divergence,
+      coherenceLoss: node.coherenceLoss,
+      signatureDrift: node.signatureDrift,
+      entangledWith: node.entangledWith,
+      updatedAt: node.updatedAt,
+    };
+  }
+
+  // ------------------------------------------------------------
+  // Substrate Fork Replay
+  // ------------------------------------------------------------
+  private globalSubstrateForkReplay(nodeId: string, forkId: string) {
+    const canon = this.planetary.canon;
+
+    const nodeA = canon[nodeId];
+    const nodeB = canon[forkId];
+
+    if (!nodeA || !nodeB) {
+      return {
+        ok: false,
+        error: "CANON_FORK_REPLAY_NODE_NOT_FOUND",
+      };
+    }
+
+    return {
+      ok: true,
+      original: {
+        id: nodeA.id,
+        signature: nodeA.signature,
+        state: nodeA.state,
+      },
+      fork: {
+        id: nodeB.id,
+        signature: nodeB.signature,
+        state: nodeB.state,
+      },
+    };
+  }
 
