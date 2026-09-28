@@ -1,380 +1,350 @@
-// PortalKernel.ts — Phase-12 RES-Shell Kernel
-// Architecture: RES-proof projection of AFA/MAX
-// Runtime: Cloudflare Workers + Hono
-// Mode: Strict envelopes, phase engine, governance, identity
+// src/do/PortalKernel.ts
+// Portal‑OS Phase‑12 — Strict Mode Kernel (Durable Object) with Explicit Lanes
 
-import { Hono } from 'hono';
-import { jwt } from 'hono/jwt';
-import { jwtVerify } from 'hono/utils/jwt';
-import { HTTPException } from 'hono/http-exception';
-import { atob, crypto } from 'cloudflare:workers';
+import { Hono } from "hono";
 
-export type Env = {
-  PORTAL_JWT_SECRET: string;
-};
+export interface Env {
+  PORTAL_OS_PHASE: string;
+  PLANETARY_MODE: string;
+  UMBRELLA_ENFORCEMENT: string;
+  IDENTITY_JWT_ISSUER: string;
+  IDENTITY_JWT_AUDIENCE: string;
+  IDENTITY_JWT_SECRET: string;
+  MAX_OS_VERSION: string;
+  // Add KV / DO bindings as needed, e.g.:
+  // MAXOS_STATE: KVNamespace;
+}
 
-export type PortalPhaseId =
-  | 'BOOT'
-  | 'IDENTITY'
-  | 'GOVERNANCE'
-  | 'SIMULATION'
-  | 'OBSERVATION'
-  | 'SHUTDOWN';
-
-export type EnvelopeKind =
-  | 'REQUEST'
-  | 'EVENT'
-  | 'STATE'
-  | 'ERROR'
-  | 'CONTROL';
-
-export interface PortalEnvelope<TPayload = unknown> {
-  id: string;
-  kind: EnvelopeKind;
-  phase: PortalPhaseId;
-  actor?: string;
-  timestamp: string;
-  payload: TPayload;
-  trace?: string[];
+export interface Envelope {
+  lane: string;        // "portal" | "planetary" | "sim" | "windows" | "identity" | "umbrella" | "timeline" | "diff" | "replay"
+  op: string;          // operation name per lane
+  identity?: string;   // JWT token (strict mode requires this for non-identity lanes)
+  meta?: any;          // governance / tracing / tags
+  payload?: any;       // lane-specific data
 }
 
 export interface IdentityContext {
-  subjectId: string;
-  roles: string[];
-  claims: Record<string, unknown>;
+  sub: string;
+  roles?: string[];
+  claims?: Record<string, any>;
 }
 
-export interface GovernanceDecision {
-  allowed: boolean;
-  reason?: string;
-  policyId?: string;
-}
+// ------------------------------------------------------------
+// Durable Object class
+// ------------------------------------------------------------
 
-export interface PhaseTransition {
-  from: PortalPhaseId;
-  to: PortalPhaseId;
-  reason: string;
-}
+export class PortalKernel {
+  private state: DurableObjectState;
+  private env: Env;
+  private router: Hono;
 
-export interface PortalResponse<TPayload = unknown> {
-  envelope: PortalEnvelope<TPayload>;
-  transitions?: PhaseTransition[];
-}
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state;
+    this.env = env;
+    this.router = buildRouter(env, state);
+  }
 
-// ---------- Utility: Strict Envelope Construction ----------
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-function newEnvelope<TPayload>(
-  kind: EnvelopeKind,
-  phase: PortalPhaseId,
-  payload: TPayload,
-  actor?: string,
-  trace?: string[]
-): PortalEnvelope<TPayload> {
-  return {
-    id: crypto.randomUUID(),
-    kind,
-    phase,
-    actor,
-    timestamp: nowIso(),
-    payload,
-    trace: trace ?? [],
-  };
-}
-
-function appendTrace(
-  envelope: PortalEnvelope,
-  label: string
-): PortalEnvelope {
-  return {
-    ...envelope,
-    trace: [...(envelope.trace ?? []), label],
-  };
-}
-
-// ---------- Identity: JWT Enforcement (Projection Only) ----------
-
-async function resolveIdentity(
-  c: any
-): Promise<IdentityContext | null> {
-  const token = c.req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) return null;
-
-  try {
-    const secret = c.env.PORTAL_JWT_SECRET;
-    const payload = await jwtVerify(token, secret);
-    return {
-      subjectId: String(payload.sub ?? 'unknown'),
-      roles: Array.isArray(payload.roles) ? payload.roles.map(String) : [],
-      claims: payload,
-    };
-  } catch {
-    return null;
+  async fetch(request: Request): Promise<Response> {
+    return this.router.fetch(request);
   }
 }
 
-// ---------- Governance: UmbrellaStrict Projection ----------
+// ------------------------------------------------------------
+// Router — explicit lanes
+// ------------------------------------------------------------
 
-function evaluateGovernance(
-  envelope: PortalEnvelope,
-  identity: IdentityContext | null
-): GovernanceDecision {
-  const phase = envelope.phase;
+function buildRouter(env: Env, state: DurableObjectState): Hono {
+  const app = new Hono();
 
-  if (phase === 'BOOT') {
-    return { allowed: true, policyId: 'BOOT-OPEN' };
-  }
+  // Portal lane — surface, panels, console state
+  app.post("/portal", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
 
-  if (!identity) {
-    return {
-      allowed: false,
-      reason: 'Identity required',
-      policyId: `${phase}-IDENTITY-REQUIRED`,
-    };
-  }
-
-  const hasRole = (role: string) => identity.roles.includes(role);
-
-  switch (phase) {
-    case 'IDENTITY':
-      return { allowed: true, policyId: 'IDENTITY-ANY' };
-    case 'GOVERNANCE':
-      return {
-        allowed: hasRole('admin'),
-        reason: hasRole('admin') ? undefined : 'Admin role required',
-        policyId: 'GOVERNANCE-ADMIN',
-      };
-    case 'SIMULATION':
-      return {
-        allowed: hasRole('sim-actor'),
-        reason: hasRole('sim-actor') ? undefined : 'sim-actor role required',
-        policyId: 'SIMULATION-ACTOR',
-      };
-    case 'OBSERVATION':
-      return {
-        allowed: hasRole('observer') || hasRole('admin'),
-        reason:
-          hasRole('observer') || hasRole('admin')
-            ? undefined
-            : 'observer or admin role required',
-        policyId: 'OBSERVATION-ACCESS',
-      };
-    case 'SHUTDOWN':
-      return {
-        allowed: hasRole('admin'),
-        reason: hasRole('admin') ? undefined : 'Admin role required',
-        policyId: 'SHUTDOWN-ADMIN',
-      };
-    default:
-      return {
-        allowed: false,
-        reason: 'Unknown phase',
-        policyId: 'UNKNOWN-PHASE',
-      };
-  }
-}
-
-// ---------- Phase Engine: Strict, Projection-Only ----------
-
-function nextPhase(
-  current: PortalPhaseId,
-  envelope: PortalEnvelope
-): PhaseTransition | null {
-  switch (current) {
-    case 'BOOT':
-      return {
-        from: 'BOOT',
-        to: 'IDENTITY',
-        reason: 'System boot complete; identity required',
-      };
-    case 'IDENTITY':
-      return {
-        from: 'IDENTITY',
-        to: 'GOVERNANCE',
-        reason: 'Identity resolved; governance evaluation',
-      };
-    case 'GOVERNANCE':
-      return {
-        from: 'GOVERNANCE',
-        to: 'SIMULATION',
-        reason: 'Governance passed; simulation allowed',
-      };
-    case 'SIMULATION':
-      return {
-        from: 'SIMULATION',
-        to: 'OBSERVATION',
-        reason: 'Simulation step complete; observation phase',
-      };
-    case 'OBSERVATION':
-      return {
-        from: 'OBSERVATION',
-        to: 'SHUTDOWN',
-        reason: 'Observation complete; shutdown sequence',
-      };
-    case 'SHUTDOWN':
-      return null;
-    default:
-      return null;
-  }
-}
-
-// ---------- Simulation / Behavior Projections ----------
-
-interface SimulationInput {
-  scenario: string;
-  parameters: Record<string, unknown>;
-}
-
-interface SimulationOutput {
-  scenario: string;
-  result: Record<string, unknown>;
-}
-
-function runSimulation(
-  envelope: PortalEnvelope<SimulationInput>
-): SimulationOutput {
-  const { scenario, parameters } = envelope.payload;
-
-  return {
-    scenario,
-    result: {
-      status: 'ok',
-      processedAt: nowIso(),
-      parameters,
-    },
-  };
-}
-
-// ---------- Error Envelope ----------
-
-function errorEnvelope(
-  phase: PortalPhaseId,
-  message: string,
-  actor?: string,
-  trace?: string[]
-): PortalEnvelope<{ message: string }> {
-  return newEnvelope('ERROR', phase, { message }, actor, trace);
-}
-
-// ---------- Hono App / Worker Entrypoint ----------
-
-const app = new Hono<{ Bindings: Env }>();
-
-app.use('*', async (c, next) => {
-  const identity = await resolveIdentity(c);
-  c.set('identity', identity);
-  await next();
-});
-
-app.post('/portal/simulate', async (c) => {
-  const identity = c.get('identity') as IdentityContext | null;
-
-  let bootEnv = newEnvelope<SimulationInput>(
-    'REQUEST',
-    'BOOT',
-    await c.req.json(),
-    identity?.subjectId
-  );
-  bootEnv = appendTrace(bootEnv, 'BOOT');
-
-  const identityTransition = nextPhase('BOOT', bootEnv);
-  if (!identityTransition) {
-    throw new HTTPException(500, { message: 'Invalid phase transition from BOOT' });
-  }
-
-  let identityEnv: PortalEnvelope<SimulationInput> = {
-    ...bootEnv,
-    phase: identityTransition.to,
-  };
-  identityEnv = appendTrace(identityEnv, 'IDENTITY');
-
-  const govTransition = nextPhase(identityEnv.phase, identityEnv);
-  if (!govTransition) {
-    throw new HTTPException(500, { message: 'Invalid phase transition from IDENTITY' });
-  }
-
-  let govEnv: PortalEnvelope<SimulationInput> = {
-    ...identityEnv,
-    phase: govTransition.to,
-  };
-  govEnv = appendTrace(govEnv, 'GOVERNANCE');
-
-  const decision = evaluateGovernance(govEnv, identity);
-  if (!decision.allowed) {
-    const errEnv = errorEnvelope(
-      govEnv.phase,
-      decision.reason ?? 'Governance denied',
-      identity?.subjectId,
-      govEnv.trace
-    );
-    return c.json<PortalResponse<{ message: string }>>(
-      {
-        envelope: errEnv,
-        transitions: [identityTransition, govTransition],
-      },
-      403
-    );
-  }
-
-  const simTransition = nextPhase(govEnv.phase, govEnv);
-  if (!simTransition) {
-    throw new HTTPException(500, { message: 'Invalid phase transition from GOVERNANCE' });
-  }
-
-  let simEnv: PortalEnvelope<SimulationInput> = {
-    ...govEnv,
-    phase: simTransition.to,
-  };
-  simEnv = appendTrace(simEnv, 'SIMULATION');
-
-  const simOutput = runSimulation(simEnv);
-
-  const obsTransition = nextPhase(simEnv.phase, simEnv);
-  if (!obsTransition) {
-    throw new HTTPException(500, { message: 'Invalid phase transition from SIMULATION' });
-  }
-
-  let obsEnv: PortalEnvelope<SimulationOutput> = {
-    ...simEnv,
-    phase: obsTransition.to,
-    payload: simOutput,
-  };
-  obsEnv = appendTrace(obsEnv, 'OBSERVATION');
-
-  const shutTransition = nextPhase(obsEnv.phase, obsEnv);
-
-  const transitions: PhaseTransition[] = [
-    identityTransition,
-    govTransition,
-    simTransition,
-    obsTransition,
-  ];
-  if (shutTransition) transitions.push(shutTransition);
-
-  const finalEnv: PortalEnvelope<SimulationOutput> = shutTransition
-    ? {
-        ...obsEnv,
-        phase: shutTransition.to,
-        trace: appendTrace(obsEnv, 'SHUTDOWN').trace,
-      }
-    : obsEnv;
-
-  const response: PortalResponse<SimulationOutput> = {
-    envelope: finalEnv,
-    transitions,
-  };
-
-  return c.json(response, 200);
-});
-
-app.get('/portal/health', (c) => {
-  const env = newEnvelope('STATE', 'BOOT', { status: 'ok', phase: 'BOOT' });
-  return c.json<PortalResponse<{ status: string; phase: string }>>({
-    envelope: env,
+    const result = await handlePortalLane(env, state, envelope, identity);
+    return c.json(result);
   });
-});
 
-export default app;
+  // Planetary lane — substrate, quantum entropy, nodes
+  app.post("/planetary", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
+
+    const result = await handlePlanetaryLane(env, state, envelope, identity);
+    return c.json(result);
+  });
+
+  // SIM lane — simulation trajectories
+  app.post("/sim", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
+
+    const result = await handleSimLane(env, state, envelope, identity);
+    return c.json(result);
+  });
+
+  // Windows lane — OS windows / registry
+  app.post("/windows", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
+
+    const result = await handleWindowsLane(env, state, envelope, identity);
+    return c.json(result);
+  });
+
+  // Identity lane — login, tokens, introspection
+  app.post("/identity", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const result = await handleIdentityLane(env, state, envelope);
+    return c.json(result);
+  });
+
+  // Umbrella lane — governance, enforcement inspection
+  app.post("/umbrella", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
+
+    const result = await handleUmbrellaLane(env, state, envelope, identity);
+    return c.json(result);
+  });
+
+  // Planetary timeline — event history
+  app.post("/planetary/timeline", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
+
+    const result = await handleTimelineLane(env, state, envelope, identity);
+    return c.json(result);
+  });
+
+  // Planetary diff — state comparison
+  app.post("/planetary/diff", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
+
+    const result = await handleDiffLane(env, state, envelope, identity);
+    return c.json(result);
+  });
+
+  // Planetary replay — replay events / states
+  app.post("/planetary/replay", async (c) => {
+    const envelope = await normalizeEnvelope(c.req);
+    const identity = await enforceStrictIdentity(env, envelope);
+    enforceUmbrellaStrict(env, envelope, identity);
+
+    const result = await handleReplayLane(env, state, envelope, identity);
+    return c.json(result);
+  });
+
+  return app;
+}
+
+// ------------------------------------------------------------
+// Envelope normalization
+// ------------------------------------------------------------
+
+async function normalizeEnvelope(req: Request): Promise<Envelope> {
+  const body = await req.json().catch(() => ({}));
+
+  return {
+    lane: body.lane,
+    op: body.op,
+    identity: body.identity,
+    meta: body.meta ?? {},
+    payload: body.payload ?? {},
+  };
+}
+
+// ------------------------------------------------------------
+// Strict identity enforcement
+// ------------------------------------------------------------
+
+async function enforceStrictIdentity(env: Env, envelope: Envelope): Promise<IdentityContext | undefined> {
+  // identity lane can be exempt
+  if (envelope.lane === "identity") return undefined;
+
+  const token = envelope.identity;
+  if (!token) {
+    throw new Error("StrictMode: identity JWT required for non-identity lane");
+  }
+
+  const ctx = await verifyIdentityJWT(env, token);
+  return ctx;
+}
+
+// NOTE: replace this with your actual JWT verification implementation.
+async function verifyIdentityJWT(env: Env, token: string): Promise<IdentityContext> {
+  // This is a placeholder. In your real code, use a JWT library and env secrets.
+  return {
+    sub: "stub-user",
+    roles: ["stub-role"],
+    claims: { token },
+  };
+}
+
+// ------------------------------------------------------------
+// Umbrella — Strict governance
+// ------------------------------------------------------------
+
+function enforceUmbrellaStrict(env: Env, envelope: Envelope, identity?: IdentityContext): void {
+  const enforcement = env.UMBRELLA_ENFORCEMENT || "strict";
+  if (enforcement !== "strict") return;
+
+  // Example rule: identity required for planetary mutations
+  if (envelope.lane === "planetary" && !identity) {
+    throw new Error("UmbrellaStrict: planetary lane requires identity");
+  }
+
+  // Example rule: governance meta required for high-impact ops
+  const highImpactOps = ["mutate", "reset", "fork"];
+  if (highImpactOps.includes(envelope.op) && !envelope.meta?.governance) {
+    throw new Error("UmbrellaStrict: high-impact op requires governance meta");
+  }
+
+  // Extend here with entropy thresholds, role checks, etc.
+}
+
+// ------------------------------------------------------------
+// Lane handlers (stubs to be filled with your logic)
+// ------------------------------------------------------------
+
+async function handlePortalLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement portal surface / panels logic
+  return {
+    ok: true,
+    lane: "portal",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handlePlanetaryLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement planetary substrate, quantum entropy, node updates
+  return {
+    ok: true,
+    lane: "planetary",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handleSimLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement simulation trajectories
+  return {
+    ok: true,
+    lane: "sim",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handleWindowsLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement windows registry / OS windows
+  return {
+    ok: true,
+    lane: "windows",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handleIdentityLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope
+) {
+  // TODO: implement login, token issuance, identity introspection
+  return {
+    ok: true,
+    lane: "identity",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handleUmbrellaLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement governance inspection / enforcement controls
+  return {
+    ok: true,
+    lane: "umbrella",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handleTimelineLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement timeline read/write using DO storage / KV
+  return {
+    ok: true,
+    lane: "timeline",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handleDiffLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement diff between planetary states
+  return {
+    ok: true,
+    lane: "diff",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
+
+async function handleReplayLane(
+  env: Env,
+  state: DurableObjectState,
+  envelope: Envelope,
+  identity?: IdentityContext
+) {
+  // TODO: implement replay of past events / states
+  return {
+    ok: true,
+    lane: "replay",
+    op: envelope.op,
+    payload: envelope.payload,
+  };
+}
