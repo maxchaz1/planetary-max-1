@@ -1,1476 +1,380 @@
-// planetary-max/src/do/PortalKernel.ts
-// Portal‑OS v12 — Strict Mode Kernel + Phase‑12 Quantum Entropy + Replay
+// PortalKernel.ts — Phase-12 RES-Shell Kernel
+// Architecture: RES-proof projection of AFA/MAX
+// Runtime: Cloudflare Workers + Hono
+// Mode: Strict envelopes, phase engine, governance, identity
 
-import type { DurableObjectState } from "@cloudflare/workers-types";
-import type { Bindings, KernelEnvelope, JsonObject } from "../contracts";
+import { Hono } from 'hono';
+import { jwt } from 'hono/jwt';
+import { jwtVerify } from 'hono/utils/jwt';
+import { HTTPException } from 'hono/http-exception';
+import { atob, crypto } from 'cloudflare:workers';
 
-import {
-  createEmptyPortalSurfaceState,
-  openPanel,
-  closePanel,
-  movePanel,
-  resizePanel,
-  togglePanel,
-  toPortalEnvelope,
-  type PortalSurfaceState,
-} from "./PortalSurface";
+export type Env = {
+  PORTAL_JWT_SECRET: string;
+};
 
-import {
-  createEmptyPortalTimeline,
-  addTimelineEvent,
-  toPortalTimelineEnvelope,
-  type PortalTimeline,
-  type PortalTimelineEvent,
-} from "./PortalTimeline";
+export type PortalPhaseId =
+  | 'BOOT'
+  | 'IDENTITY'
+  | 'GOVERNANCE'
+  | 'SIMULATION'
+  | 'OBSERVATION'
+  | 'SHUTDOWN';
 
-import {
-  computePortalDiff,
-  toPortalDiffEnvelope,
-} from "./PortalTimelineDiff";
+export type EnvelopeKind =
+  | 'REQUEST'
+  | 'EVENT'
+  | 'STATE'
+  | 'ERROR'
+  | 'CONTROL';
 
-// Phase‑12 planetary substrate
-import {
-  type PlanetaryState,
-  toPlanetaryEnvelope,
-} from "../planetary";
+export interface PortalEnvelope<TPayload = unknown> {
+  id: string;
+  kind: EnvelopeKind;
+  phase: PortalPhaseId;
+  actor?: string;
+  timestamp: string;
+  payload: TPayload;
+  trace?: string[];
+}
 
-// ------------------------------------------------------------
-// Identity + governance types
-// ------------------------------------------------------------
-
-interface IdentityContext {
-  subject: string;
+export interface IdentityContext {
+  subjectId: string;
   roles: string[];
   claims: Record<string, unknown>;
 }
 
-// ------------------------------------------------------------
-// PortalKernel Durable Object
-// ------------------------------------------------------------
+export interface GovernanceDecision {
+  allowed: boolean;
+  reason?: string;
+  policyId?: string;
+}
 
-export class PortalKernel {
-  state: DurableObjectState;
-  env: Bindings;
+export interface PhaseTransition {
+  from: PortalPhaseId;
+  to: PortalPhaseId;
+  reason: string;
+}
 
-  planetary: PlanetaryState;
+export interface PortalResponse<TPayload = unknown> {
+  envelope: PortalEnvelope<TPayload>;
+  transitions?: PhaseTransition[];
+}
 
-  constructor(state: DurableObjectState, env: Bindings) {
-    this.state = state;
-    this.env = env;
+// ---------- Utility: Strict Envelope Construction ----------
 
-    this.planetary = {
-      globalTick: 0,
-      nodes: [],
-      identities: {},
-      substrate: {},
-      quantum: {},
-      canon: {},
-      governance: {},
-      advisories: [],
-      synchronizedAt: Date.now(),
-      packetSignature: "EMPTY-PACKET",
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
-      quantumEntropy: 0,
-      entropyGradient: [],
-      coherenceField: [],
-      entanglementGraph: {},
-      signatureMap: {},
-      entropyTick: 0,
+function newEnvelope<TPayload>(
+  kind: EnvelopeKind,
+  phase: PortalPhaseId,
+  payload: TPayload,
+  actor?: string,
+  trace?: string[]
+): PortalEnvelope<TPayload> {
+  return {
+    id: crypto.randomUUID(),
+    kind,
+    phase,
+    actor,
+    timestamp: nowIso(),
+    payload,
+    trace: trace ?? [],
+  };
+}
+
+function appendTrace(
+  envelope: PortalEnvelope,
+  label: string
+): PortalEnvelope {
+  return {
+    ...envelope,
+    trace: [...(envelope.trace ?? []), label],
+  };
+}
+
+// ---------- Identity: JWT Enforcement (Projection Only) ----------
+
+async function resolveIdentity(
+  c: any
+): Promise<IdentityContext | null> {
+  const token = c.req.header('Authorization')?.replace('Bearer ', '');
+  if (!token) return null;
+
+  try {
+    const secret = c.env.PORTAL_JWT_SECRET;
+    const payload = await jwtVerify(token, secret);
+    return {
+      subjectId: String(payload.sub ?? 'unknown'),
+      roles: Array.isArray(payload.roles) ? payload.roles.map(String) : [],
+      claims: payload,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---------- Governance: UmbrellaStrict Projection ----------
+
+function evaluateGovernance(
+  envelope: PortalEnvelope,
+  identity: IdentityContext | null
+): GovernanceDecision {
+  const phase = envelope.phase;
+
+  if (phase === 'BOOT') {
+    return { allowed: true, policyId: 'BOOT-OPEN' };
+  }
+
+  if (!identity) {
+    return {
+      allowed: false,
+      reason: 'Identity required',
+      policyId: `${phase}-IDENTITY-REQUIRED`,
     };
   }
 
-  // ------------------------------------------------------------
-  // ⭐ Strict Envelope Validation (Phase‑12)
-  // ------------------------------------------------------------
-  private validateEnvelopeStrict(envelope: KernelEnvelope) {
-    const required = ["id", "lane", "op", "payload"];
-    for (const field of required) {
-      if (!(field in envelope)) {
-        return {
-          ok: false,
-          error: {
-            code: "STRICT_ENVELOPE_MISSING_FIELD",
-            message: `Envelope missing required field: ${field}`,
-          },
-        };
-      }
-    }
+  const hasRole = (role: string) => identity.roles.includes(role);
 
-    if (typeof envelope.id !== "string") {
+  switch (phase) {
+    case 'IDENTITY':
+      return { allowed: true, policyId: 'IDENTITY-ANY' };
+    case 'GOVERNANCE':
       return {
-        ok: false,
-        error: {
-          code: "STRICT_ENVELOPE_INVALID_ID",
-          message: "Envelope.id must be a string",
-        },
+        allowed: hasRole('admin'),
+        reason: hasRole('admin') ? undefined : 'Admin role required',
+        policyId: 'GOVERNANCE-ADMIN',
       };
-    }
-
-    if (typeof envelope.lane !== "string") {
+    case 'SIMULATION':
       return {
-        ok: false,
-        error: {
-          code: "STRICT_ENVELOPE_INVALID_LANE",
-          message: "Envelope.lane must be a string",
-        },
+        allowed: hasRole('sim-actor'),
+        reason: hasRole('sim-actor') ? undefined : 'sim-actor role required',
+        policyId: 'SIMULATION-ACTOR',
       };
-    }
-
-    if (typeof envelope.op !== "string") {
+    case 'OBSERVATION':
       return {
-        ok: false,
-        error: {
-          code: "STRICT_ENVELOPE_INVALID_OP",
-          message: "Envelope.op must be a string",
-        },
+        allowed: hasRole('observer') || hasRole('admin'),
+        reason:
+          hasRole('observer') || hasRole('admin')
+            ? undefined
+            : 'observer or admin role required',
+        policyId: 'OBSERVATION-ACCESS',
       };
-    }
-
-    if (typeof envelope.payload !== "object" || envelope.payload === null) {
+    case 'SHUTDOWN':
       return {
-        ok: false,
-        error: {
-          code: "STRICT_ENVELOPE_INVALID_PAYLOAD",
-          message: "Envelope.payload must be a JSON object",
-        },
+        allowed: hasRole('admin'),
+        reason: hasRole('admin') ? undefined : 'Admin role required',
+        policyId: 'SHUTDOWN-ADMIN',
       };
-    }
-
-    if (envelope.meta && typeof envelope.meta !== "object") {
+    default:
       return {
-        ok: false,
-        error: {
-          code: "STRICT_ENVELOPE_INVALID_META",
-          message: "Envelope.meta must be a JSON object",
-        },
+        allowed: false,
+        reason: 'Unknown phase',
+        policyId: 'UNKNOWN-PHASE',
       };
-    }
-
-    if (envelope.identity && typeof envelope.identity !== "string") {
-      return {
-        ok: false,
-        error: {
-          code: "STRICT_ENVELOPE_INVALID_IDENTITY",
-          message: "Envelope.identity must be a string when present",
-        },
-      };
-    }
-
-    const allowedLanes = new Set([
-      "identity",
-      "windows",
-      "sim",
-      "umbrella",
-      "portal",
-      "portal:timeline",
-      "portal:diff",
-      "portal:replay",
-      "planetary",
-      "planetary:tick",
-      "planetary:entropy",
-    ]);
-
-    if (!allowedLanes.has(envelope.lane)) {
-      return {
-        ok: false,
-        error: {
-          code: "STRICT_ENVELOPE_UNKNOWN_LANE",
-          message: `Unknown or disallowed lane: ${envelope.lane}`,
-        },
-      };
-    }
-
-    return { ok: true };
   }
+}
 
-  // ------------------------------------------------------------
-  // ⭐ Phase‑12 Quantum Entropy Computation
-  // ------------------------------------------------------------
-  private computeQuantumEntropy(): void {
-    const nodes = this.planetary.nodes;
+// ---------- Phase Engine: Strict, Projection-Only ----------
 
-    const divergence = nodes.map((n) => n.divergence ?? 0);
-    const signatureDrift = nodes.map((n) => n.signatureDrift ?? 0);
-    const coherenceLoss = nodes.map((n) => n.coherenceLoss ?? 0);
-
-    const avgNodeDivergence =
-      divergence.reduce((a, b) => a + b, 0) / (divergence.length || 1);
-
-    const avgSignatureDrift =
-      signatureDrift.reduce((a, b) => a + b, 0) / (signatureDrift.length || 1);
-
-    const avgCoherenceLoss =
-      coherenceLoss.reduce((a, b) => a + b, 0) / (coherenceLoss.length || 1);
-
-    const entanglementInstability =
-      Object.keys(this.planetary.entanglementGraph).length * 0.01;
-
-    const substrateNoise = Math.random() * 0.05;
-
-    this.planetary.quantumEntropy =
-      (avgNodeDivergence +
-        avgSignatureDrift +
-        avgCoherenceLoss +
-        entanglementInstability +
-        substrateNoise) / 5;
-
-    this.planetary.entropyGradient = divergence;
-    this.planetary.coherenceField = coherenceLoss;
-    this.planetary.entropyTick++;
-  }
-
-  // ------------------------------------------------------------
-  // ⭐ Phase‑12 planetary tick loop
-  // ------------------------------------------------------------
-  private planetaryTick(): void {
-    this.planetary.globalTick++;
-    this.computeQuantumEntropy();
-    this.planetary.synchronizedAt = Date.now();
-  }
-
-  // ------------------------------------------------------------
-  // ⭐ JWT decode helper (no verification, just parsing)
-  // ------------------------------------------------------------
-  private decodeJwt(token: string): Record<string, unknown> | null {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-
-    try {
-      const payload = parts[1];
-      const padded = payload.padEnd(
-        payload.length + (4 - (payload.length % 4)) % 4,
-        "="
-      );
-      const json = atob(padded);
-      return JSON.parse(json);
-    } catch {
+function nextPhase(
+  current: PortalPhaseId,
+  envelope: PortalEnvelope
+): PhaseTransition | null {
+  switch (current) {
+    case 'BOOT':
+      return {
+        from: 'BOOT',
+        to: 'IDENTITY',
+        reason: 'System boot complete; identity required',
+      };
+    case 'IDENTITY':
+      return {
+        from: 'IDENTITY',
+        to: 'GOVERNANCE',
+        reason: 'Identity resolved; governance evaluation',
+      };
+    case 'GOVERNANCE':
+      return {
+        from: 'GOVERNANCE',
+        to: 'SIMULATION',
+        reason: 'Governance passed; simulation allowed',
+      };
+    case 'SIMULATION':
+      return {
+        from: 'SIMULATION',
+        to: 'OBSERVATION',
+        reason: 'Simulation step complete; observation phase',
+      };
+    case 'OBSERVATION':
+      return {
+        from: 'OBSERVATION',
+        to: 'SHUTDOWN',
+        reason: 'Observation complete; shutdown sequence',
+      };
+    case 'SHUTDOWN':
       return null;
-    }
+    default:
+      return null;
+  }
+}
+
+// ---------- Simulation / Behavior Projections ----------
+
+interface SimulationInput {
+  scenario: string;
+  parameters: Record<string, unknown>;
+}
+
+interface SimulationOutput {
+  scenario: string;
+  result: Record<string, unknown>;
+}
+
+function runSimulation(
+  envelope: PortalEnvelope<SimulationInput>
+): SimulationOutput {
+  const { scenario, parameters } = envelope.payload;
+
+  return {
+    scenario,
+    result: {
+      status: 'ok',
+      processedAt: nowIso(),
+      parameters,
+    },
+  };
+}
+
+// ---------- Error Envelope ----------
+
+function errorEnvelope(
+  phase: PortalPhaseId,
+  message: string,
+  actor?: string,
+  trace?: string[]
+): PortalEnvelope<{ message: string }> {
+  return newEnvelope('ERROR', phase, { message }, actor, trace);
+}
+
+// ---------- Hono App / Worker Entrypoint ----------
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.use('*', async (c, next) => {
+  const identity = await resolveIdentity(c);
+  c.set('identity', identity);
+  await next();
+});
+
+app.post('/portal/simulate', async (c) => {
+  const identity = c.get('identity') as IdentityContext | null;
+
+  let bootEnv = newEnvelope<SimulationInput>(
+    'REQUEST',
+    'BOOT',
+    await c.req.json(),
+    identity?.subjectId
+  );
+  bootEnv = appendTrace(bootEnv, 'BOOT');
+
+  const identityTransition = nextPhase('BOOT', bootEnv);
+  if (!identityTransition) {
+    throw new HTTPException(500, { message: 'Invalid phase transition from BOOT' });
   }
 
-  // ------------------------------------------------------------
-  // ⭐ Identity verification (Phase‑12 strict JWT)
-  // ------------------------------------------------------------
-  private async verifyIdentity(
-    identityToken?: string
-  ): Promise<IdentityContext | null> {
-    if (!identityToken) return null;
+  let identityEnv: PortalEnvelope<SimulationInput> = {
+    ...bootEnv,
+    phase: identityTransition.to,
+  };
+  identityEnv = appendTrace(identityEnv, 'IDENTITY');
 
-    const decoded = this.decodeJwt(identityToken);
-    if (!decoded) {
-      throw new Error("Identity: invalid JWT structure");
-    }
-
-    const issuer = decoded["iss"];
-    const audience = decoded["aud"];
-    const subject = decoded["sub"];
-    const exp = decoded["exp"];
-
-    if (typeof issuer !== "string" || issuer !== this.env.IDENTITY_JWT_ISSUER) {
-      throw new Error("Identity: invalid issuer");
-    }
-
-    if (
-      typeof audience !== "string" ||
-      audience !== this.env.IDENTITY_JWT_AUDIENCE
-    ) {
-      throw new Error("Identity: invalid audience");
-    }
-
-    if (typeof subject !== "string" || !subject.length) {
-      throw new Error("Identity: missing subject");
-    }
-
-    if (typeof exp !== "number" || Date.now() / 1000 >= exp) {
-      throw new Error("Identity: token expired");
-    }
-
-    const roles = Array.isArray(decoded["roles"])
-      ? (decoded["roles"] as string[])
-      : [];
-
-    this.planetary.identities[subject] = {
-      roles,
-      claims: decoded,
-    };
-
-    return {
-      subject,
-      roles,
-      claims: decoded,
-    };
+  const govTransition = nextPhase(identityEnv.phase, identityEnv);
+  if (!govTransition) {
+    throw new HTTPException(500, { message: 'Invalid phase transition from IDENTITY' });
   }
 
-  // ------------------------------------------------------------
-  // ⭐ Governance signature verification (Phase‑12)
-  // ------------------------------------------------------------
-  private async verifyGovernanceSignature(packet: JsonObject): Promise<void> {
-    const secret = this.env.GOVERNANCE_SECRET;
-    if (!secret) throw new Error("UmbrellaStrict: missing governance secret");
+  let govEnv: PortalEnvelope<SimulationInput> = {
+    ...identityEnv,
+    phase: govTransition.to,
+  };
+  govEnv = appendTrace(govEnv, 'GOVERNANCE');
 
-    const signature = packet.signature;
-    if (typeof signature !== "string") {
-      throw new Error("UmbrellaStrict: governance packet missing signature");
-    }
-
-    if (this.planetary.signatureMap[signature]) {
-      throw new Error("UmbrellaStrict: governance packet replay detected");
-    }
-
-    const issuedAt = packet.issuedAt;
-    const expiresAt = packet.expiresAt;
-
-    if (typeof issuedAt !== "number" || typeof expiresAt !== "number") {
-      throw new Error("UmbrellaStrict: governance packet missing timestamps");
-    }
-
-    const now = Date.now();
-    if (now < issuedAt || now > expiresAt) {
-      throw new Error("UmbrellaStrict: governance packet expired");
-    }
-
-    const scope = packet.scope;
-    if (typeof scope !== "string") {
-      throw new Error("UmbrellaStrict: governance packet missing scope");
-    }
-
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"]
+  const decision = evaluateGovernance(govEnv, identity);
+  if (!decision.allowed) {
+    const errEnv = errorEnvelope(
+      govEnv.phase,
+      decision.reason ?? 'Governance denied',
+      identity?.subjectId,
+      govEnv.trace
     );
-
-    const data = encoder.encode(`${issuedAt}:${expiresAt}:${scope}`);
-    const sigBytes = Uint8Array.from(atob(signature), (c) =>
-      c.charCodeAt(0)
-    );
-
-    const valid = await crypto.subtle.verify("HMAC", key, sigBytes, data);
-    if (!valid) {
-      throw new Error("UmbrellaStrict: invalid governance signature");
-    }
-
-    this.planetary.signatureMap[signature] = true;
-  }
-
-  // ------------------------------------------------------------
-  // ⭐ UmbrellaStrict governance (Phase‑12 strict)
-  // ------------------------------------------------------------
-  private async enforceUmbrellaStrict(
-    lane: string,
-    op: string | undefined,
-    identity: IdentityContext | null,
-    payload: JsonObject
-  ): Promise<void> {
-    const mode = this.env.UMBRELLA_ENFORCEMENT ?? "strict";
-    if (mode !== "strict") return;
-
-    if (lane !== "identity" && !identity) {
-      throw new Error("UmbrellaStrict: identity required");
-    }
-
-    if (
-      (lane === "portal:replay" || lane === "portal:diff") &&
-      (!identity || !identity.roles.includes("planetary-operator"))
-    ) {
-      throw new Error("UmbrellaStrict: operator role required");
-    }
-
-    const highImpactOps = ["mutate", "reset", "fork", "inject", "entropy"];
-    if (lane.startsWith("planetary") && op && highImpactOps.includes(op)) {
-      const governance = payload.governance;
-      if (!governance || typeof governance !== "object") {
-        throw new Error("UmbrellaStrict: governance packet required");
-      }
-
-      await this.verifyGovernanceSignature(governance);
-
-      if (!identity!.roles.includes("planetary-governor")) {
-        throw new Error("UmbrellaStrict: governor role required");
-      }
-
-      this.planetary.advisories.push({
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        op,
-        scope: (governance as any).scope,
-        issuedBy: identity!.subject,
-      });
-    }
-  }
-
-  // ------------------------------------------------------------
-  // Main fetch handler (strict mode)
-  // ------------------------------------------------------------
-  async fetch(request: Request): Promise<Response> {
-    if (request.method !== "POST") {
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: "INVALID_METHOD",
-            message: "Kernel only accepts POST envelopes",
-          },
-        },
-        { status: 405 }
-      );
-    }
-
-    let envelope: KernelEnvelope;
-    try {
-      envelope = await request.json();
-    } catch {
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: "INVALID_ENVELOPE",
-            message: "Kernel envelope must be valid JSON",
-          },
-        },
-        { status: 400 }
-      );
-    }
-
-    const strictCheck = this.validateEnvelopeStrict(envelope);
-    if (!strictCheck.ok) {
-      return Response.json(
-        {
-          ok: false,
-          error: strictCheck.error,
-        },
-        { status: 400 }
-      );
-    }
-
-    const { id, lane, payload, identity: identityToken, op } = envelope;
-
-    let identityCtx: IdentityContext | null = null;
-    try {
-      identityCtx = await this.verifyIdentity(identityToken);
-      await this.enforceUmbrellaStrict(lane, op, identityCtx, payload);
-    } catch (err) {
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: "UMBRELLA_STRICT_VIOLATION",
-            message:
-              err instanceof Error ? err.message : "Umbrella strict violation",
-          },
-        },
-        { status: 403 }
-      );
-    }
-
-    switch (lane) {
-      case "identity":
-        return this.handleIdentity(id, identityToken ?? "", payload);
-
-      case "windows":
-        return this.handleWindows(id, identityToken ?? "", payload);
-
-      case "sim":
-        return this.handleSim(id, identityToken ?? "", payload);
-
-      case "umbrella":
-        return this.handleUmbrella(id, identityToken ?? "", payload);
-
-      case "portal":
-        return this.handlePortal(id, identityToken ?? "", payload);
-
-      case "portal:timeline":
-        return this.handlePortalTimeline();
-
-      case "portal:diff":
-        return this.handlePortalDiff(payload);
-
-      case "portal:replay":
-        return this.handlePortalReplay(payload);
-
-      case "planetary":
-        return Response.json(toPlanetaryEnvelope(this.planetary));
-
-      case "planetary:tick":
-        this.planetaryTick();
-        return Response.json({
-          ok: true,
-          lane: "planetary:tick",
-          tick: this.planetary.globalTick,
-          entropy: this.planetary.quantumEntropy,
-        });
-
-      case "planetary:entropy":
-        return Response.json({
-          ok: true,
-          lane: "planetary:entropy",
-          entropy: this.planetary.quantumEntropy,
-          gradient: this.planetary.entropyGradient,
-          coherence: this.planetary.coherenceField,
-          entanglement: this.planetary.entanglementGraph,
-          signatures: this.planetary.signatureMap,
-          tick: this.planetary.entropyTick,
-        });
-
-      default:
-        return Response.json(
-          {
-            ok: false,
-            error: {
-              code: "INVALID_LANE",
-              message: `Unknown kernel lane: ${lane}`,
-            },
-          },
-          { status: 400 }
-        );
-    }
-  }
-
-  // ------------------------------------------------------------
-  // Storage helpers
-  // ------------------------------------------------------------
-  async loadSurface(): Promise<PortalSurfaceState> {
-    return (
-      (await this.state.storage.get("portal:surface")) ??
-      createEmptyPortalSurfaceState()
-    );
-  }
-
-  async saveSurface(surface: PortalSurfaceState) {
-    await this.state.storage.put("portal:surface", surface);
-  }
-
-  async loadTimeline(): Promise<PortalTimeline> {
-    return (
-      (await this.state.storage.get("portal:timeline")) ??
-      createEmptyPortalTimeline()
-    );
-  }
-
-  async saveTimeline(timeline: PortalTimeline) {
-    await this.state.storage.put("portal:timeline", timeline);
-  }
-
-  // ------------------------------------------------------------
-  // Identity lane
-  // ------------------------------------------------------------
-  async handleIdentity(
-    id: string,
-    identity: string,
-    payload: JsonObject
-  ): Promise<Response> {
-    return Response.json({
-      ok: true,
-      lane: "identity",
-      id,
-      identity,
-      echo: payload,
-    });
-  }
-
-  // ------------------------------------------------------------
-  // Windows lane
-  // ------------------------------------------------------------
-  async handleWindows(
-    id: string,
-    identity: string,
-    payload: JsonObject
-  ): Promise<Response> {
-    const action = payload.action ?? "noop";
-
-    switch (action) {
-      case "open":
-      case "close":
-        return Response.json({
-          ok: true,
-          lane: "windows",
-          id,
-          identity,
-          action,
-          window: payload.window ?? null,
-        });
-
-      default:
-        return Response.json(
-          {
-            ok: false,
-            error: {
-              code: "WINDOWS_INVALID_ACTION",
-              message: `Unknown windows action: ${action}`,
-            },
-          },
-          { status: 400 }
-        );
-    }
-  }
-
-  // ------------------------------------------------------------
-  // SIM lane
-  // ------------------------------------------------------------
-  async handleSim(
-    id: string,
-    identity: string,
-    payload: JsonObject
-  ): Promise<Response> {
-    return Response.json({
-      ok: true,
-      lane: "sim",
-      id,
-      identity,
-      sim: {
-        mode: this.env.PLANETARY_MODE ?? "single",
-        echo: payload,
+    return c.json<PortalResponse<{ message: string }>>(
+      {
+        envelope: errEnv,
+        transitions: [identityTransition, govTransition],
       },
-    });
-  }
-
-  // ------------------------------------------------------------
-  // Umbrella lane
-  // ------------------------------------------------------------
-  async handleUmbrella(
-    id: string,
-    identity: string,
-    payload: JsonObject
-  ): Promise<Response> {
-    const mode = this.env.UMBRELLA_ENFORCEMENT ?? "strict";
-
-    return Response.json({
-      ok: true,
-      lane: "umbrella",
-      id,
-      identity,
-      governance: {
-        mode,
-        echo: payload,
-      },
-    });
-  }
-
-  // ------------------------------------------------------------
-  // Portal lane (interactive + timeline)
-  // ------------------------------------------------------------
-  async handlePortal(
-    id: string,
-    identity: string,
-    payload: JsonObject
-  ): Promise<Response> {
-    const action = payload.action ?? "noop";
-
-    let surface = await this.loadSurface();
-    let timeline = await this.loadTimeline();
-
-    const recordEvent = (panel: string | null) => {
-      const event: PortalTimelineEvent = {
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        action,
-        panel,
-        payload,
-      };
-      timeline = addTimelineEvent(timeline, event);
-      this.saveTimeline(timeline);
-    };
-
-    switch (action) {
-      case "open": {
-        const panel = {
-          id: payload.panel,
-          title: payload.title ?? payload.panel,
-          x: payload.x ?? 100,
-          y: payload.y ?? 100,
-          width: payload.width ?? 300,
-          height: payload.height ?? 200,
-          visible: true,
-        };
-
-        surface = openPanel(surface, panel);
-        await this.saveSurface(surface);
-
-        recordEvent(panel.id);
-
-        return Response.json({
-          ok: true,
-          lane: "portal",
-          id,
-          identity,
-          action,
-          panel,
-          surface: toPortalEnvelope(surface),
-          timeline: toPortalTimelineEnvelope(timeline),
-        });
-      }
-
-      case "close": {
-        surface = closePanel(surface, payload.panel);
-        await this.saveSurface(surface);
-
-        recordEvent(payload.panel);
-
-        return Response.json({
-          ok: true,
-          lane: "portal",
-          id,
-          identity,
-          action,
-          panel: payload.panel,
-          surface: toPortalEnvelope(surface),
-          timeline: toPortalTimelineEnvelope(timeline),
-        });
-      }
-
-      case "move": {
-        surface = movePanel(surface, payload.panel, payload.x, payload.y);
-        await this.saveSurface(surface);
-
-        recordEvent(payload.panel);
-
-        return Response.json({
-          ok: true,
-          lane: "portal",
-          id,
-          identity,
-          action,
-          panel: payload.panel,
-          surface: toPortalEnvelope(surface),
-          timeline: toPortalTimelineEnvelope(timeline),
-        });
-      }
-
-      case "resize": {
-        surface = resizePanel(
-          surface,
-          payload.panel,
-          payload.width,
-          payload.height
-        );
-        await this.saveSurface(surface);
-
-        recordEvent(payload.panel);
-
-        return Response.json({
-          ok: true,
-          lane: "portal",
-          id,
-          identity,
-          action,
-          panel: payload.panel,
-          surface: toPortalEnvelope(surface),
-          timeline: toPortalTimelineEnvelope(timeline),
-        });
-      }
-
-      case "toggle": {
-        surface = togglePanel(surface, payload.panel, payload.visible);
-        await this.saveSurface(surface);
-
-        recordEvent(payload.panel);
-
-        return Response.json({
-          ok: true,
-          lane: "portal",
-          id,
-          identity,
-          action,
-          panel: payload.panel,
-          surface: toPortalEnvelope(surface),
-          timeline: toPortalTimelineEnvelope(timeline),
-        });
-      }
-
-      default:
-        return Response.json(
-          {
-            ok: false,
-            error: {
-              code: "PORTAL_INVALID_ACTION",
-              message: `Unknown portal action: ${action}`,
-            },
-          },
-          { status: 400 }
-        );
-    }
-  }
-
-  // ------------------------------------------------------------
-  // Portal Timeline read
-  // ------------------------------------------------------------
-  async handlePortalTimeline(): Promise<Response> {
-    const timeline = await this.loadTimeline();
-    return Response.json(toPortalTimelineEnvelope(timeline));
-  }
-
-  // ------------------------------------------------------------
-  // Portal Diff lane
-  // ------------------------------------------------------------
-  async handlePortalDiff(payload: JsonObject): Promise<Response> {
-    const fromId = payload.from;
-    const toId = payload.to;
-
-    const timeline = await this.loadTimeline();
-
-    const eventFrom = timeline.events.find((e) => e.id === fromId);
-    const eventTo = timeline.events.find((e) => e.id === toId);
-
-    if (!eventFrom || !eventTo) {
-      return Response.json(
-        {
-          ok: false,
-          error: {
-            code: "PORTAL_DIFF_EVENT_NOT_FOUND",
-            message: "One or both timeline events not found",
-          },
-        },
-        { status: 404 }
-      );
-    }
-
-    const surfaceBefore = await this.replaySurfaceUntil(fromId);
-    const surfaceAfter = await this.replaySurfaceUntil(toId);
-
-    const diff = computePortalDiff(
-      surfaceBefore,
-      surfaceAfter,
-      eventFrom,
-      eventTo
+      403
     );
-
-    return Response.json(toPortalDiffEnvelope(diff));
   }
 
-  // ------------------------------------------------------------
-  // ⭐ Replay engine lane
-  // ------------------------------------------------------------
-  async handlePortalReplay(payload: JsonObject): Promise<Response> {
-    const eventId = payload.eventId ?? null;
-
-    const timeline = await this.loadTimeline();
-    const surface = await this.replaySurfaceUntil(eventId);
-
-    return Response.json({
-      ok: true,
-      lane: "portal:replay",
-      eventId,
-      surface: toPortalEnvelope(surface),
-    });
+  const simTransition = nextPhase(govEnv.phase, govEnv);
+  if (!simTransition) {
+    throw new HTTPException(500, { message: 'Invalid phase transition from GOVERNANCE' });
   }
 
-  // ------------------------------------------------------------
-  // Replay engine core
-  // ------------------------------------------------------------
-   async replaySurfaceUntil(eventId: string | null): Promise<PortalSurfaceState> {
-    const timeline = await this.loadTimeline();
-    let surface = createEmptyPortalSurfaceState();
+  let simEnv: PortalEnvelope<SimulationInput> = {
+    ...govEnv,
+    phase: simTransition.to,
+  };
+  simEnv = appendTrace(simEnv, 'SIMULATION');
 
-    for (const event of timeline.events) {
-      const { action, panel, payload } = event;
+  const simOutput = runSimulation(simEnv);
 
-      switch (action) {
-        case "open":
-          surface = openPanel(surface, {
-            id: panel!,
-            title: payload.title ?? panel,
-            x: payload.x ?? 100,
-            y: payload.y ?? 100,
-            width: payload.width ?? 300,
-            height: payload.height ?? 200,
-            visible: true,
-          });
-          break;
+  const obsTransition = nextPhase(simEnv.phase, simEnv);
+  if (!obsTransition) {
+    throw new HTTPException(500, { message: 'Invalid phase transition from SIMULATION' });
+  }
 
-        case "close":
-          surface = closePanel(surface, panel!);
-          break;
+  let obsEnv: PortalEnvelope<SimulationOutput> = {
+    ...simEnv,
+    phase: obsTransition.to,
+    payload: simOutput,
+  };
+  obsEnv = appendTrace(obsEnv, 'OBSERVATION');
 
-        case "move":
-          surface = movePanel(surface, panel!, payload.x, payload.y);
-          break;
+  const shutTransition = nextPhase(obsEnv.phase, obsEnv);
 
-        case "resize":
-          surface = resizePanel(
-            surface,
-            panel!,
-            payload.width,
-            payload.height
-          );
-          break;
+  const transitions: PhaseTransition[] = [
+    identityTransition,
+    govTransition,
+    simTransition,
+    obsTransition,
+  ];
+  if (shutTransition) transitions.push(shutTransition);
 
-        case "toggle":
-          surface = togglePanel(surface, panel!, payload.visible);
-          break;
+  const finalEnv: PortalEnvelope<SimulationOutput> = shutTransition
+    ? {
+        ...obsEnv,
+        phase: shutTransition.to,
+        trace: appendTrace(obsEnv, 'SHUTDOWN').trace,
       }
-
-      if (eventId && event.id === eventId) break;
-    }
-
-    return surface;
-  }
-    // ------------------------------------------------------------
-  // ⭐ Phase‑12 Planetary Node Lifecycle
-  // ------------------------------------------------------------
-
-  private createNode(id: string, identity: IdentityContext | null) {
-    const node = {
-      id,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      divergence: 0,
-      coherenceLoss: 0,
-      signatureDrift: 0,
-      entangledWith: [],
-      identity: identity ? identity.subject : "anonymous",
-      state: {},
-    };
-
-    this.planetary.nodes.push(node);
-    return node;
-  }
-
-  private getNode(id: string) {
-    return this.planetary.nodes.find((n) => n.id === id) ?? null;
-  }
-
-  private updateNode(id: string, mutation: JsonObject) {
-    const node = this.getNode(id);
-    if (!node) return null;
-
-    node.updatedAt = Date.now();
-
-    // Mutation increases divergence
-    node.divergence += 0.01;
-
-    // Signature drift increases with mutation complexity
-    node.signatureDrift += Object.keys(mutation).length * 0.001;
-
-    // Coherence loss increases with entropy
-    node.coherenceLoss += this.planetary.quantumEntropy * 0.005;
-
-    // Apply mutation
-    Object.assign(node.state, mutation);
-
-    return node;
-  }
-
-  private removeNode(id: string) {
-    this.planetary.nodes = this.planetary.nodes.filter((n) => n.id !== id);
-  }
-
-  private resetNode(id: string) {
-    const node = this.getNode(id);
-    if (!node) return null;
-
-    node.state = {};
-    node.divergence = 0;
-    node.coherenceLoss = 0;
-    node.signatureDrift = 0;
-    node.entangledWith = [];
-    node.updatedAt = Date.now();
-
-    return node;
-  }
-
-  private forkNode(id: string, newId: string) {
-    const node = this.getNode(id);
-    if (!node) return null;
-
-    const fork = {
-      ...node,
-      id: newId,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      divergence: node.divergence * 0.5,
-      coherenceLoss: node.coherenceLoss * 0.5,
-      signatureDrift: node.signatureDrift * 0.5,
-    };
-
-    this.planetary.nodes.push(fork);
-    return fork;
-  }
-
-  private injectNode(id: string, payload: JsonObject) {
-    const node = this.getNode(id);
-    if (!node) return null;
-
-    node.state = {
-      ...node.state,
-      ...payload,
-    };
-
-    node.updatedAt = Date.now();
-    node.divergence += 0.02;
-
-    return node;
-  }
-
-  private entangleNodes(a: string, b: string) {
-    const nodeA = this.getNode(a);
-    const nodeB = this.getNode(b);
-
-    if (!nodeA || !nodeB) return;
-
-    nodeA.entangledWith.push(b);
-    nodeB.entangledWith.push(a);
-
-    this.planetary.entanglementGraph[`${a}:${b}`] = {
-      createdAt: Date.now(),
-      entropy: this.planetary.quantumEntropy,
-    };
-  }
-  // ------------------------------------------------------------
-  // ⭐ Phase‑12 Canonical Substrate Engine
-  // ------------------------------------------------------------
-
-  private computeCanonicalSignature(node: any): string {
-    const base = `${node.id}:${node.updatedAt}:${node.divergence}:${node.signatureDrift}`;
-    const encoder = new TextEncoder();
-    const data = encoder.encode(base);
-
-    // Simple deterministic hash for canonical signature
-    let hash = 0;
-    for (let i = 0; i < data.length; i++) {
-      hash = (hash * 31 + data[i]) >>> 0;
-    }
-
-    return hash.toString(16);
-  }
-
-  private updateCanonicalSubstrate() {
-    const substrate: Record<string, any> = {};
-
-    for (const node of this.planetary.nodes) {
-      const signature = this.computeCanonicalSignature(node);
-
-      substrate[node.id] = {
-        id: node.id,
-        signature,
-        divergence: node.divergence,
-        coherenceLoss: node.coherenceLoss,
-        signatureDrift: node.signatureDrift,
-        entangledWith: node.entangledWith,
-        identity: node.identity,
-        updatedAt: node.updatedAt,
-        state: node.state,
-      };
-
-      // Track canonical signature map
-      this.planetary.signatureMap[node.id] = signature;
-    }
-
-    this.planetary.canon = substrate;
-    this.planetary.synchronizedAt = Date.now();
-  }
-
-  private injectCanonicalState(nodeId: string, payload: JsonObject) {
-    const node = this.getNode(nodeId);
-    if (!node) return null;
-
-    Object.assign(node.state, payload);
-    node.updatedAt = Date.now();
-    node.divergence += 0.03;
-    node.signatureDrift += 0.01;
-
-    this.updateCanonicalSubstrate();
-    return node;
-  }
-
-  private diffCanonicalSubstrate(a: string, b: string) {
-    const canon = this.planetary.canon;
-
-    const nodeA = canon[a];
-    const nodeB = canon[b];
-
-    if (!nodeA || !nodeB) {
-      return {
-        ok: false,
-        error: "CANON_DIFF_NODE_NOT_FOUND",
-      };
-    }
-
-    const diff: Record<string, any> = {};
-
-    const keys = new Set([...Object.keys(nodeA.state), ...Object.keys(nodeB.state)]);
-    for (const key of keys) {
-      const valA = nodeA.state[key];
-      const valB = nodeB.state[key];
-
-      if (valA !== valB) {
-        diff[key] = { from: valA, to: valB };
-      }
-    }
-
-    return {
-      ok: true,
-      from: a,
-      to: b,
-      diff,
-    };
-  }
-
-  private replayCanonicalSubstrate(nodeId: string) {
-    const node = this.getNode(nodeId);
-    if (!node) return null;
-
-    return {
-      id: node.id,
-      state: node.state,
-      signature: this.computeCanonicalSignature(node),
-      divergence: node.divergence,
-      coherenceLoss: node.coherenceLoss,
-      signatureDrift: node.signatureDrift,
-      entangledWith: node.entangledWith,
-      updatedAt: node.updatedAt,
-    };
-  }
-  // ------------------------------------------------------------
-  // ⭐ Phase‑12 Governed Planetary Ops (Full Expanded Block)
-  // ------------------------------------------------------------
-
-  // ------------------------------------------------------------
-  // Planetary Injection (governed)
-  // ------------------------------------------------------------
-  private governedPlanetaryInject(
-    nodeId: string,
-    payload: JsonObject,
-    identity: IdentityContext
-  ) {
-    if (!identity.roles.includes("planetary-governor")) {
-      throw new Error("UmbrellaStrict: governor role required for injection");
-    }
-
-    const node = this.getNode(nodeId);
-    if (!node) throw new Error("PLANETARY_NODE_NOT_FOUND");
-
-    Object.assign(node.state, payload);
-
-    node.updatedAt = Date.now();
-    node.divergence += 0.05;
-    node.signatureDrift += 0.02;
-    node.coherenceLoss += this.planetary.quantumEntropy * 0.01;
-
-    this.updateCanonicalSubstrate();
-
-    this.planetary.advisories.push({
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      op: "inject",
-      scope: "planetary.inject",
-      issuedBy: identity.subject,
-      node: nodeId,
-    });
-
-    return node;
-  }
-
-  // ------------------------------------------------------------
-  // Planetary Fork (governed)
-  // ------------------------------------------------------------
-  private governedPlanetaryFork(
-    nodeId: string,
-    newId: string,
-    identity: IdentityContext
-  ) {
-    if (!identity.roles.includes("planetary-governor")) {
-      throw new Error("UmbrellaStrict: governor role required for fork");
-    }
-
-    const node = this.getNode(nodeId);
-    if (!node) throw new Error("PLANETARY_NODE_NOT_FOUND");
-
-    const fork = {
-      ...node,
-      id: newId,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      divergence: node.divergence * 0.5,
-      coherenceLoss: node.coherenceLoss * 0.5,
-      signatureDrift: node.signatureDrift * 0.5,
-      entangledWith: [...node.entangledWith],
-      state: { ...node.state },
-    };
-
-    this.planetary.nodes.push(fork);
-    this.updateCanonicalSubstrate();
-
-    this.planetary.advisories.push({
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      op: "fork",
-      scope: "planetary.fork",
-      issuedBy: identity.subject,
-      node: nodeId,
-      fork: newId,
-    });
-
-    return fork;
-  }
-
-  // ------------------------------------------------------------
-  // Planetary Reset (governed)
-  // ------------------------------------------------------------
-  private governedPlanetaryReset(
-    nodeId: string,
-    identity: IdentityContext
-  ) {
-    if (!identity.roles.includes("planetary-governor")) {
-      throw new Error("UmbrellaStrict: governor role required for reset");
-    }
-
-    const node = this.getNode(nodeId);
-    if (!node) throw new Error("PLANETARY_NODE_NOT_FOUND");
-
-    node.state = {};
-    node.divergence = 0;
-    node.coherenceLoss = 0;
-    node.signatureDrift = 0;
-    node.entangledWith = [];
-    node.updatedAt = Date.now();
-
-    this.updateCanonicalSubstrate();
-
-    this.planetary.advisories.push({
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      op: "reset",
-      scope: "planetary.reset",
-      issuedBy: identity.subject,
-      node: nodeId,
-    });
-
-    return node;
-  }
-
-  // ------------------------------------------------------------
-  // Entropy Governance (Phase‑12)
-  // ------------------------------------------------------------
-  private governedEntropyOverride(
-    value: number,
-    identity: IdentityContext
-  ) {
-    if (!identity.roles.includes("planetary-governor")) {
-      throw new Error("UmbrellaStrict: governor role required for entropy override");
-    }
-
-    this.planetary.quantumEntropy = value;
-    this.planetary.entropyTick++;
-    this.planetary.synchronizedAt = Date.now();
-
-    this.planetary.advisories.push({
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      op: "entropy",
-      scope: "planetary.entropy.override",
-      issuedBy: identity.subject,
-      value,
-    });
-
-    return {
-      ok: true,
-      entropy: value,
-    };
-  }
-
-  // ------------------------------------------------------------
-  // Global Substrate Diff Engine
-  // ------------------------------------------------------------
-  private globalSubstrateDiff(a: string, b: string) {
-    const canon = this.planetary.canon;
-
-    const nodeA = canon[a];
-    const nodeB = canon[b];
-
-    if (!nodeA || !nodeB) {
-      return { ok: false, error: "CANON_DIFF_NODE_NOT_FOUND" };
-    }
-
-    const diff: Record<string, any> = {};
-    const keys = new Set([...Object.keys(nodeA.state), ...Object.keys(nodeB.state)]);
-
-    for (const key of keys) {
-      const valA = nodeA.state[key];
-      const valB = nodeB.state[key];
-      if (valA !== valB) diff[key] = { from: valA, to: valB };
-    }
-
-    return { ok: true, from: a, to: b, diff };
-  }
-
-  // ------------------------------------------------------------
-  // Global Substrate Replay Engine
-  // ------------------------------------------------------------
-  private globalSubstrateReplay(nodeId: string) {
-    const node = this.getNode(nodeId);
-    if (!node) return { ok: false, error: "CANON_REPLAY_NODE_NOT_FOUND" };
-
-    return {
-      ok: true,
-      id: node.id,
-      state: node.state,
-      signature: this.computeCanonicalSignature(node),
-      divergence: node.divergence,
-      coherenceLoss: node.coherenceLoss,
-      signatureDrift: node.signatureDrift,
-      entangledWith: node.entangledWith,
-      updatedAt: node.updatedAt,
-    };
-  }
-
-  // ------------------------------------------------------------
-  // Substrate Fork Replay
-  // ------------------------------------------------------------
-  private globalSubstrateForkReplay(nodeId: string, forkId: string) {
-    const canon = this.planetary.canon;
-
-    const nodeA = canon[nodeId];
-    const nodeB = canon[forkId];
-
-    if (!nodeA || !nodeB) {
-      return { ok: false, error: "CANON_FORK_REPLAY_NODE_NOT_FOUND" };
-    }
-
-    return {
-      ok: true,
-      original: {
-        id: nodeA.id,
-        signature: nodeA.signature,
-        state: nodeA.state,
-      },
-      fork: {
-        id: nodeB.id,
-        signature: nodeB.signature,
-        state: nodeB.state,
-      },
-    };
-  }
-
-  // ------------------------------------------------------------
-  // ⭐ Phase‑12 Planetary Ops Router (Expanded)
-  // ------------------------------------------------------------
-  private async routePlanetaryOps(
-    id: string,
-    identity: IdentityContext,
-    payload: JsonObject
-  ): Promise<Response> {
-    const op = payload.op ?? null;
-
-    switch (op) {
-      case "inject": {
-        const nodeId = payload.node;
-        const data = payload.data ?? {};
-        const node = this.governedPlanetaryInject(nodeId, data, identity);
-
-        return Response.json({
-          ok: true,
-          lane: "planetary",
-          op: "inject",
-          id,
-          node: nodeId,
-          state: node.state,
-          canon: this.planetary.canon[nodeId],
-        });
-      }
-
-      case "fork": {
-        const nodeId = payload.node;
-        const forkId = payload.fork;
-        const fork = this.governedPlanetaryFork(nodeId, forkId, identity);
-
-        return Response.json({
-          ok: true,
-          lane: "planetary",
-          op: "fork",
-          id,
-          original: nodeId,
-          fork: forkId,
-          state: fork.state,
-          canon: this.planetary.canon[forkId],
-        });
-      }
-
-      case "reset": {
-        const nodeId = payload.node;
-        const node = this.governedPlanetaryReset(nodeId, identity);
-
-        return Response.json({
-          ok: true,
-          lane: "planetary",
-          op: "reset",
-          id,
-          node: nodeId,
-          state: node.state,
-          canon: this.planetary.canon[nodeId],
-        });
-      }
-
-      case "entropy": {
-        const value = payload.value ?? 0;
-        this.governedEntropyOverride(value, identity);
-
-        return Response.json({
-          ok: true,
-          lane: "planetary",
-          op: "entropy",
-          id,
-          entropy: this.planetary.quantumEntropy,
-          tick: this.planetary.entropyTick,
-        });
-      }
-
-      case "canon:diff": {
-        const a = payload.from;
-        const b = payload.to;
-        const diff = this.globalSubstrateDiff(a, b);
-
-        return Response.json({
-          ok: diff.ok,
-          lane: "planetary",
-          op: "canon:diff",
-          id,
-          from: a,
-          to: b,
-          diff,
-        });
-      }
-
-      case "canon:replay": {
-        const nodeId = payload.node;
-        const replay = this.globalSubstrateReplay(nodeId);
-
-        return Response.json({
-          ok: replay.ok,
-          lane: "planetary",
-          op: "canon:replay",
-          id,
-          replay,
-        });
-      }
-
-      case "canon:fork:replay": {
-        const nodeId = payload.node;
-        const forkId = payload.fork;
-        const replay = this.globalSubstrateForkReplay(nodeId, forkId);
-
-        return Response.json({
-          ok: replay.ok,
-          lane: "planetary",
-          op: "canon:fork:replay",
-          id,
-          replay,
-        });
-      }
-
-      default:
-        return Response.json(
-          {
-            ok: false,
-            error: {
-              code: "PLANETARY_OP_UNKNOWN",
-              message: `Unknown planetary op: ${op}`,
-            },
-          },
-          { status: 400 }
-        );
-    }
-  }
-
+    : obsEnv;
+
+  const response: PortalResponse<SimulationOutput> = {
+    envelope: finalEnv,
+    transitions,
+  };
+
+  return c.json(response, 200);
+});
+
+app.get('/portal/health', (c) => {
+  const env = newEnvelope('STATE', 'BOOT', { status: 'ok', phase: 'BOOT' });
+  return c.json<PortalResponse<{ status: string; phase: string }>>({
+    envelope: env,
+  });
+});
+
+export default app;
