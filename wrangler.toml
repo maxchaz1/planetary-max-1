@@ -18,9 +18,6 @@ CIRCUIT_COOLDOWN_MS = "30000"
 binding = "KERNEL_SERVICE"
 service = "portal-kernel"
 
-[[r2_buckets]]
-binding = "MAXOS_STATE"
-bucket_name = "planetary-max"
 
 [build]
 command = "npm run build"
